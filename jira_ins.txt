@@ -1,0 +1,436 @@
+JIRA SPRINT HEALTH MONITOR - STEP-BY-STEP SETUP
+================================================
+From a brand-new laptop to a real digest email in your inbox.
+Rough time: 60-90 minutes the first time.
+
+Contents
+  PART 1  Install the tools on the laptop
+  PART 2  Get the project from GitHub
+  PART 3  (Optional) Run the automated tests
+  PART 4  Create the Jira Cloud account and Scrum project
+  PART 5  Create a Jira API token
+  PART 6  Fill Jira with the sample sprint (seed script)
+  PART 7  Create a Gmail app password (for sending email)
+  PART 8  Start n8n and create your local n8n login
+  PART 9  Create the 3 credentials in n8n
+  PART 10 Import the two workflows
+  PART 11 Connect credentials + settings inside the workflows
+  PART 12 Add the email recipients (Data Table)
+  PART 13 First runs: dry run, real run, re-run
+  PART 14 Turn on the daily 09:00 schedule
+  PART 15 Troubleshooting
+  CHECKLIST at the end
+
+Never paste your API token or app password into chat, email, the repo or a
+workflow node. They only go into n8n's Credentials screen (and, for the seed
+script, into a PowerShell window that you close afterwards).
+
+
+------------------------------------------------------------------------
+PART 1 - INSTALL THE TOOLS ON THE LAPTOP
+------------------------------------------------------------------------
+Windows instructions. On a Mac, use the macOS installers from the same sites
+and the Terminal app instead of PowerShell.
+
+1. Node.js (runs n8n and our scripts)
+   - Go to https://nodejs.org and download the "LTS" version (22.x).
+   - Run the installer with all default options.
+   - Open a NEW PowerShell window and check:
+       node -v        -> should print v22.something
+       npm -v         -> should print a version number
+
+2. Git (gets the code; also gives you "Git Bash")
+   - https://git-scm.com/download/win -> install with default options.
+   - Check in a new PowerShell:   git --version
+
+3. GitHub CLI (easiest way to log in to GitHub, the repo is private)
+   - https://cli.github.com -> install.
+   - Check:   gh --version
+
+4. n8n
+   - In PowerShell:
+       npm install -g n8n
+   - This takes a few minutes. Check:   n8n --version
+
+
+------------------------------------------------------------------------
+PART 2 - GET THE PROJECT FROM GITHUB
+------------------------------------------------------------------------
+1. Log in to GitHub (one time):
+       gh auth login
+   Choose: GitHub.com -> HTTPS -> Yes (authenticate Git) -> Login with a web
+   browser. Copy the code it shows, press Enter, paste the code in the browser.
+
+2. Download the repo to a folder, for example D:\projects:
+       cd D:\
+       mkdir projects
+       cd projects
+       gh repo clone Chethan616/jira-sprint-health-n8n
+       cd jira-sprint-health-n8n
+
+   (Sanjna: if this says "not found", ask Chethan to add you on GitHub:
+    repo -> Settings -> Collaborators -> Add people.)
+
+3. What's inside: see README.md. The two decks are in the deck\ folder.
+
+
+------------------------------------------------------------------------
+PART 3 - (OPTIONAL) RUN THE AUTOMATED TESTS
+------------------------------------------------------------------------
+These use a fake Jira and a fake mail server, so no accounts are needed. They
+run in their own n8n folder (.n8n-test) and never touch your real n8n.
+
+1. Unit tests (PowerShell, inside the project folder):
+       npm test
+   Expect: "pass 16", "fail 0".
+
+2. End-to-end tests. These need Git Bash, not PowerShell:
+   - Open "Git Bash" from the Start menu.
+   - cd /d/projects/jira-sprint-health-n8n
+   - bash tests/setup-test-env.sh      (wait for "READY", about 1 minute)
+   - node tests/run-e2e.js             (about 3-4 minutes)
+   Expect the last line: "21/21 passed".
+
+3. Stop the test servers afterwards: close the Git Bash window, or re-run
+   setup next time (it stops old ones first).
+
+
+------------------------------------------------------------------------
+PART 4 - CREATE THE JIRA CLOUD ACCOUNT AND SCRUM PROJECT
+------------------------------------------------------------------------
+One person creates the site, then invites the other. The Free plan allows
+up to 10 users.
+
+1. Go to https://www.atlassian.com/software/jira/free
+2. Click "Get it free" / "Sign up".
+3. Enter your email (personal or work, whichever you're allowed to use for
+   the assignment) and verify it from the email Atlassian sends.
+4. Choose a SITE NAME, for example  sprinthealth-chethan
+   Your site becomes:  https://sprinthealth-chethan.atlassian.net
+   WRITE THIS URL DOWN. It is your "Jira base URL" / "domain" later.
+5. If it asks what you're working on, pick Software development. Skip any
+   "invite teammates" screen for now.
+6. Create the project:
+   - Top menu: Projects -> Create project.
+   - Template: Software development -> SCRUM.
+   - Click "Use template".
+   - Project type: either "Team-managed" or "Company-managed" works.
+   - Name: Sprint Health Demo
+   - Key: SCRUM   (WRITE IT DOWN. If SCRUM is taken, use whatever key it gives.)
+   - Click Create.
+7. Invite your teammate (optional): Settings (gear icon) -> User management
+   -> Invite users -> enter their email.
+
+Notes
+- Team-managed Scrum projects have sprints switched on by default. If you see
+  no "Backlog"/"Sprints" view: Project settings -> Features -> turn Sprints on.
+- Default workflows have To Do / In Progress / Done, with no "Blocked" status.
+  That's fine: our workflow also treats the Flagged field and "is blocked by"
+  links as Blocked.
+
+
+------------------------------------------------------------------------
+PART 5 - CREATE A JIRA API TOKEN
+------------------------------------------------------------------------
+1. Go to https://id.atlassian.com/manage-profile/security/api-tokens
+   (same login as Jira).
+2. Click "Create API token". If it offers "with scopes" and "without scopes",
+   choose the plain one ("Create API token" without scopes).
+3. Label: n8n sprint monitor. Set the expiry as long as allowed.
+4. Click Create, then COPY the token immediately. You can't see it again.
+   Keep it somewhere safe, like a password manager. Don't put it in any file in
+   the repo.
+5. You now have 3 Jira values:
+     Email:    the email you log in to Jira with
+     Token:    the API token you just copied
+     Domain:   https://YOUR-SITE.atlassian.net
+
+
+------------------------------------------------------------------------
+PART 6 - FILL JIRA WITH THE SAMPLE SPRINT (SEED SCRIPT)
+------------------------------------------------------------------------
+This creates an active sprint with 17 sample issues: some done, some in
+progress, a flagged one, a blocked-by link, overdue and unassigned ones.
+
+1. PowerShell, inside the project folder. Replace the values in < >:
+       $env:JIRA_BASE_URL="https://<your-site>.atlassian.net"
+       $env:JIRA_EMAIL="<your jira login email>"
+       $env:JIRA_API_TOKEN="<your api token>"
+       $env:JIRA_PROJECT_KEY="SCRUM"
+       node scripts/seed-jira.js
+2. It prints each issue it creates and ends with "Done." plus the board id.
+   WRITE DOWN THE BOARD ID it prints.
+3. Close that PowerShell window afterwards so the token isn't left in it.
+4. Check in Jira: Project -> Backlog / Board. You should see an active sprint
+   called "Payments Sprint 4 (sample)" with the issues.
+
+Expected limits of seeding (not errors):
+- Every issue is assigned to YOU, because a new site has no other users. To
+  spread the work, set $env:JIRA_ASSIGNEES="accountId1,accountId2" before
+  running.
+- "In Progress for more than 3 days" can only appear after 3 real days, because
+  Jira won't let us backdate status changes. For a same-day demo, set
+  staleInProgressDays to 0 in the Config node (Part 11).
+
+If the seed script fails:
+- 401 / 403: wrong email or token, or extra spaces when pasting.
+- "No Scrum board": the project isn't a Scrum project, or sprints are off
+  (Part 4, notes).
+- It stopped halfway: delete the sample sprint/issues in Jira, fix the
+  problem, run it again.
+- If the sprint didn't start: Backlog -> next to the sprint -> Start sprint.
+
+
+------------------------------------------------------------------------
+PART 7 - CREATE A GMAIL APP PASSWORD (FOR SENDING EMAIL)
+------------------------------------------------------------------------
+The digest is sent through Gmail's SMTP server, same as our ServiceNow
+project. Sanjna already did this for that project, so you can reuse that
+Gmail account.
+
+1. The Google account needs 2-Step Verification ON:
+   https://myaccount.google.com/security -> 2-Step Verification -> turn on.
+2. Create the app password: https://myaccount.google.com/apppasswords
+   - App name: n8n sprint digest -> Create.
+   - Copy the 16-character password (ignore the spaces).
+   (If the page says app passwords aren't available, the account is managed by
+    an organisation that blocks them. Use a personal Gmail instead.)
+3. You now have:
+     SMTP user:      the full Gmail address
+     SMTP password:  the 16-character app password
+     Host: smtp.gmail.com     Port: 465     SSL/TLS: ON
+
+
+------------------------------------------------------------------------
+PART 8 - START N8N AND CREATE YOUR LOCAL N8N LOGIN
+------------------------------------------------------------------------
+1. PowerShell (any folder):
+       n8n start
+   Wait until it says the editor is accessible on http://localhost:5678
+   Keep this window open. Closing it stops n8n.
+2. Open http://localhost:5678 in your browser.
+3. First time only: it asks you to create an owner account (email, name,
+   password). This login is only for your local n8n, not Jira or Google.
+4. Skip the survey / "customize" screens.
+
+Tip: set the timezone n8n uses by default. Stop n8n (Ctrl+C), then:
+       $env:GENERIC_TIMEZONE="Asia/Kolkata"
+       n8n start
+
+
+------------------------------------------------------------------------
+PART 9 - CREATE THE 3 CREDENTIALS IN N8N
+------------------------------------------------------------------------
+In n8n: left sidebar -> "Credentials" (or Overview -> Credentials tab) ->
+"Create credential" / "Add credential". Use EXACTLY these names. The
+workflows look for them.
+
+A) Jira
+   - Search for:  Jira SW Cloud API
+   - Name:        Jira Cloud (sprint monitor)
+   - Email:       your Jira login email
+   - API Token:   the token from Part 5
+   - Domain:      https://<your-site>.atlassian.net   (no slash at the end)
+   - Save. It should say "Connection tested successfully".
+
+B) Email (SMTP)
+   - Search for:  SMTP
+   - Name:        SMTP (sprint digest)
+   - User:        the Gmail address
+   - Password:    the 16-character app password
+   - Host:        smtp.gmail.com
+   - Port:        465
+   - SSL/TLS:     ON
+   - Save.
+
+C) Webhook token (protects the "run now" URL)
+   - Search for:  Header Auth
+   - Name:        Sprint digest webhook token
+   - Name (header name field):  X-Digest-Token
+   - Value:       make up a long random string, e.g. 30+ letters and numbers.
+                  Keep a copy; you need it in Part 13.
+   - Save.
+
+
+------------------------------------------------------------------------
+PART 10 - IMPORT THE TWO WORKFLOWS
+------------------------------------------------------------------------
+Import the error handler FIRST, then the main workflow.
+
+1. n8n -> "Create workflow" (or + / Add workflow).
+2. Top-right "..." menu -> "Import from File..."
+3. Pick:  <project folder>\workflows\error-handler.json
+4. Click Save. It's named "Jira Sprint Health - Error Handler".
+5. Repeat steps 1-4 with:  workflows\jira-sprint-health-monitor.json
+   It's named "Jira Sprint Health Monitor & Daily Digest".
+
+
+------------------------------------------------------------------------
+PART 11 - CONNECT CREDENTIALS + SETTINGS INSIDE THE WORKFLOWS
+------------------------------------------------------------------------
+Nodes with a red warning triangle need a credential selected. Double-click
+the node, pick the credential from the dropdown, close it.
+
+Main workflow "Jira Sprint Health Monitor & Daily Digest":
+  - Get Scrum Boards    -> Jira Cloud (sprint monitor)
+  - Get Active Sprints  -> Jira Cloud (sprint monitor)
+  - Get Sprint Issues   -> Jira Cloud (sprint monitor)
+  - Send Digest Email   -> SMTP (sprint digest)
+  - Run Now (webhook)   -> Sprint digest webhook token
+
+  Open the "Config" node (a Code node). Near the top, edit only the values:
+    jiraBaseUrl: 'https://<your-site>.atlassian.net',
+    boardIds: [<board id from Part 6>],        // or leave [] for all boards
+    timezone: 'Asia/Kolkata',
+    fromEmail: 'Sprint Digest <your-gmail-address@gmail.com>',
+    staleInProgressDays: 3,                    // 0 for a same-day demo
+  Leave everything else as is. Close the node.
+
+  Settings: top-right "..." -> Settings:
+    - Error workflow: choose "Jira Sprint Health - Error Handler"
+    - Timezone: Asia/Kolkata (or "Default" if you set GENERIC_TIMEZONE)
+    - Save.
+
+Error handler "Jira Sprint Health - Error Handler":
+  - Email Admins -> SMTP (sprint digest)
+  - In the same node, change "From Email" to your Gmail address. (It can't
+    read the main workflow's Config.)
+
+SAVE BOTH WORKFLOWS (Ctrl+S).
+
+Only if your Jira site differs: the Flagged and Story points field ids.
+  Logged in to Jira, open https://<your-site>.atlassian.net/rest/api/3/field
+  in the browser and press Ctrl+F:
+    "Flagged"               -> its "id" (usually customfield_10021)
+    "Story point estimate"  -> its "id" (usually customfield_10016)
+  If they're different, update flaggedField / storyPointsField in Config.
+
+
+------------------------------------------------------------------------
+PART 12 - ADD THE EMAIL RECIPIENTS (DATA TABLE)
+------------------------------------------------------------------------
+Recipients aren't typed into the workflow. They live in an n8n Data Table
+that the workflow creates the first time it runs.
+
+1. Open the main workflow -> click "Execute workflow" (runs the manual
+   trigger). The first run creates the two Data Tables. With no recipients yet
+   it sends nothing. That's expected.
+2. Go to the Data Tables screen: left sidebar -> Overview (or your project)
+   -> "Data tables" tab -> open "sprint_digest_recipients".
+3. Add rows:
+     email                  name          role     board_id   active
+     you@gmail.com          Chethan       digest   0          true
+     sanjna@...             Sanjna        digest   0          true
+     you@gmail.com          Chethan       admin    0          true
+   role "digest" = gets the daily digest
+   role "admin"  = gets an email when the workflow fails
+   board_id 0    = all boards (or a board id to limit it)
+   active false  = pause someone without deleting the row
+
+
+------------------------------------------------------------------------
+PART 13 - FIRST RUNS: DRY RUN, REAL RUN, RE-RUN
+------------------------------------------------------------------------
+A) Real run from the editor
+   - Main workflow -> "Execute workflow".
+   - Every node should turn green. Click "Run Summary" (last node) to see
+     the result: each sprint shows health, completion % and "outcome": "sent".
+   - Check your inbox (and spam): subject like
+       [Sprint Health] Payments Sprint 4 (sample) | Critical | 29% done | 2026-..
+   - Data tables -> sprint_health_runs now has a row with status "sent".
+
+B) Same-day re-run (duplicate protection)
+   - Click "Execute workflow" again.
+   - Run Summary shows "outcome": "skip_already_sent". No second email.
+
+C) Dry run / force through the webhook (needs the workflow published, Part 14)
+   PowerShell:
+     $h = @{ "X-Digest-Token" = "<your webhook token>" }
+     Invoke-RestMethod -Method Post -Uri "http://localhost:5678/webhook/sprint-health/run" `
+       -Headers $h -ContentType "application/json" -Body '{"dryRun": true}'
+   - dryRun: returns the subject and text, sends nothing, saves nothing.
+   - '{"force": true}' resends today's digest even if already sent.
+   - Wrong token -> 403 error. That's expected.
+
+D) Test the failure alert (optional)
+   - In Config, temporarily change jiraBaseUrl to https://wrong.atlassian.net
+   - Publish (Part 14) and trigger via the webhook or wait for the schedule.
+     (Errors from "Execute workflow" in the editor don't trigger the error
+     workflow; it only fires for published/production runs.)
+   - The "admin" rows get an email "[Sprint Health] Workflow failure: ...".
+   - Put the correct URL back afterwards.
+
+
+------------------------------------------------------------------------
+PART 14 - TURN ON THE DAILY 09:00 SCHEDULE
+------------------------------------------------------------------------
+1. Main workflow -> top-right "Publish" (older n8n versions call it the
+   "Active" toggle).
+2. It now runs Monday-Friday at 09:00 (workflow timezone) and the webhook URL
+   works.
+3. For EVERY day instead of weekdays: open the "Daily 09:00 (Mon-Fri)" node and
+   change the cron expression from  0 9 * * 1-5  to  0 9 * * *
+4. n8n must be running at 09:00 (Part 8 window open, laptop awake).
+5. Executions (left sidebar) shows every run, successful or failed.
+
+
+------------------------------------------------------------------------
+PART 15 - TROUBLESHOOTING
+------------------------------------------------------------------------
+"n8n is not recognized"
+   -> Close and reopen PowerShell after installing. Else: npm install -g n8n
+
+Port 5678 already in use
+   -> Another n8n is running. Close it, or: $env:N8N_PORT="5679"; n8n start
+
+Jira credential test fails / 401
+   -> Email must be your Atlassian login email. Re-copy the token, no spaces.
+      Domain must be https://<site>.atlassian.net with no trailing slash.
+
+"No sprint-capable boards found"
+   -> The Jira user can't see the project, the project isn't Scrum, or
+      boardIds in Config is wrong. Try boardIds: [].
+
+Run Summary shows status "no_active_sprint"
+   -> No sprint is started. Jira -> Backlog -> Start sprint.
+
+Run Summary shows "skip_no_recipients"
+   -> Add rows with role "digest" and active true (Part 12).
+
+Email error "Invalid login" / "Username and Password not accepted"
+   -> Use the 16-character APP password, not your normal Gmail password.
+      2-Step Verification must be on.
+
+Email sent but not in inbox
+   -> Check Spam. Mark it "Not spam" once.
+
+"In Progress > 3 days" list is always empty
+   -> Normal on a freshly seeded site (see Part 6). Use
+      staleInProgressDays: 0 for a demo.
+
+Digest says Overdue on the wrong day
+   -> Check the timezone in Config and in workflow Settings.
+
+Need to start completely fresh in n8n
+   -> Data tables -> delete sprint_health_runs rows (it's just history).
+
+
+------------------------------------------------------------------------
+CHECKLIST
+------------------------------------------------------------------------
+[ ] Node, Git, GitHub CLI, n8n installed (Part 1)
+[ ] Repo cloned (Part 2)
+[ ] npm test passes (Part 3, optional: 21/21 e2e)
+[ ] Jira site + Scrum project created, site URL and key noted (Part 4)
+[ ] API token created and stored safely (Part 5)
+[ ] Seed script run, active sample sprint visible, board id noted (Part 6)
+[ ] Gmail app password created (Part 7)
+[ ] n8n running, owner login created (Part 8)
+[ ] 3 credentials created with the exact names (Part 9)
+[ ] Both workflows imported (Part 10)
+[ ] Credentials selected on 6 nodes, Config edited, error workflow set (Part 11)
+[ ] Recipients added (Part 12)
+[ ] Real digest received; re-run skipped (Part 13)
+[ ] Error alert received (Part 13 D, optional)
+[ ] Published / schedule on (Part 14)
+[ ] Short demo recorded: a run, the email, the Data Tables
