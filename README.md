@@ -86,8 +86,11 @@ Full design: [docs/architecture.md](docs/architecture.md)
 ├── docs/
 │   ├── architecture.md  test-results.md  sample-digest.html  img/
 └── deck/
-    ├── Jira-Sprint-Health-Monitor.pptx   # 29-slide presentation
-    └── build-deck.js                     # regenerates it from the test results (npm i && npm run deck)
+    ├── Jira-Sprint-Health-Monitor.pptx                 # detailed deck with test results (27 slides)
+    ├── Jira-Sprint-Health-Monitor-Proposed-Plan.pptx   # proposed-plan deck (21 slides, speaker notes included)
+    ├── Proposed-Plan-Speaker-Notes.md                  # slide-by-slide talking points for the plan deck
+    ├── plan-notes.js                                   # source of those notes
+    └── build-deck.js                                   # npm run deck (detailed) / node deck/build-deck.js --plan
 ```
 
 ## Quick start

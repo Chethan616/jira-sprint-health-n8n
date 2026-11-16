@@ -1,12 +1,16 @@
-// Builds deck/Jira-Sprint-Health-Monitor.pptx (pptxgenjs). Styled to match the
-// team's previous deck (n8n-epsilon-detailed.pptx): same theme colours and fonts.
+// Builds the decks (pptxgenjs). Styled to match the team's previous deck
+// (n8n-epsilon-detailed.pptx): same theme colours and fonts.
+//   node deck/build-deck.js          -> Jira-Sprint-Health-Monitor.pptx (detailed, with test results)
+//   node deck/build-deck.js --plan   -> Jira-Sprint-Health-Monitor-Proposed-Plan.pptx (the plan, future tense)
 // Numbers come from docs/test-results.e2e.json and the fixture scenario.
 const path = require('path');
 const fs = require('fs');
 const pptxgen = require('pptxgenjs');
 
+const PLAN = process.argv.includes('--plan');
+const pick = (detailed, plan) => (PLAN ? plan : detailed);
 const ROOT = path.join(__dirname, '..');
-const OUT = path.join(__dirname, 'Jira-Sprint-Health-Monitor.pptx');
+const OUT = process.env.DECK_OUT || path.join(__dirname, PLAN ?'Jira-Sprint-Health-Monitor-Proposed-Plan.pptx' : 'Jira-Sprint-Health-Monitor.pptx');
 const e2e = JSON.parse(fs.readFileSync(path.join(ROOT, 'docs', 'test-results.e2e.json'), 'utf8'));
 const EMAIL_PNG = path.join(ROOT, 'docs', 'img', 'sample-digest.png');
 
@@ -88,9 +92,9 @@ const divider = (num, kick, head, sub) => {
 section('Overview');
 {
   const s = pres.addSlide({ masterName: 'DARK', sectionTitle: sec });
-  text(s, 'EPSILON · PUBLICIS GROUPE AUTOMATION ASSIGNMENT 2', { x: 0.9, y: 1.55, w: 11, h: 0.3, fontSize: 12, bold: true, color: ORANGE, charSpacing: 2 });
+  text(s, pick('EPSILON · PUBLICIS GROUPE AUTOMATION ASSIGNMENT 2', 'EPSILON · PUBLICIS GROUPE AUTOMATION ASSIGNMENT 2 · PROPOSED PLAN'), { x: 0.9, y: 1.55, w: 11, h: 0.3, fontSize: 12, bold: true, color: ORANGE, charSpacing: 2 });
   text(s, 'Jira Sprint Health Monitor\n& Daily Digest', { x: 0.9, y: 2.1, w: 11, h: 1.9, fontFace: 'Cambria', fontSize: 44, bold: true, color: 'FFFFFF' });
-  text(s, 'An n8n workflow that reads every active Jira sprint each morning and emails the team one digest: progress, blockers, stale work, overdue and unassigned issues, and who is overloaded.',
+  text(s, pick('An n8n workflow that reads every active Jira sprint each morning and emails the team one digest: progress, blockers, stale work, overdue and unassigned issues, and who is overloaded.', 'Our plan for an n8n workflow that will read every active Jira sprint each morning and email the team one digest: progress, blockers, stale work, overdue and unassigned issues, and who is overloaded.'),
     { x: 0.9, y: 4.25, w: 10.2, h: 0.9, fontSize: 16, color: 'C9D1DE' });
   text(s, 'Sanjna J   ·   Manikonda Chethan Krishna', { x: 0.9, y: 5.9, w: 8, h: 0.35, fontSize: 14, bold: true, color: 'FFFFFF' });
   text(s, 'n8n Community Edition  ·  Jira Cloud REST API  ·  n8n Data Tables  ·  SMTP', { x: 0.9, y: 6.3, w: 9, h: 0.3, fontSize: 11, color: '8A94A6' });
@@ -121,9 +125,9 @@ section('Overview');
 // ============================================================ 3. Solution
 {
   const s = content();
-  kicker(s, 'Solution');
+  kicker(s, pick('Solution', 'Proposed solution'));
   title(s, 'One scheduled workflow, one digest per sprint per day');
-  lead(s, 'Every weekday at 09:00 IST, n8n pulls each active sprint from Jira, applies the business rules, and emails a health digest exactly once per sprint per day, even if runs overlap or something fails halfway.');
+  lead(s, pick('Every weekday at 09:00 IST, n8n pulls each active sprint from Jira, applies the business rules, and emails a health digest exactly once per sprint per day, even if runs overlap or something fails halfway.', 'Every weekday at 09:00 IST, n8n will pull each active sprint from Jira, apply the business rules, and email a health digest exactly once per sprint per day, even if runs overlap or something fails halfway.'));
   const cols = [['FETCH', BLUE, 'Jira Agile API for boards and active sprints, REST v3 /search/jql for every issue. All paginated, all retried.'],
     ['ANALYZE', ORANGE, 'Buckets, stale/overdue/unassigned/blocked flags, completion vs time elapsed, workload, health rating, trend vs yesterday.'],
     ['NOTIFY', TEAL, 'Claim the digest in a Data Table, email it over SMTP one at a time, record sent or failed. Admins are alerted on failure.']];
@@ -143,7 +147,7 @@ section('Overview');
   kicker(s, 'Requirements');
   title(s, 'All eight steps of the brief, mapped to nodes');
   table(s, [
-    ['#', 'Assignment step', 'Implemented in', 'How'],
+    ['#', 'Assignment step', pick('Implemented in', 'Planned node'), 'How'],
     ['1', 'Retrieve active sprints (Jira REST)', 'Get Scrum Boards → Get Active Sprints', 'Agile API, paged with startAt / isLast'],
     ['2', 'Fetch all issues in the sprint', 'Get Sprint Issues', '/rest/api/3/search/jql, paged with nextPageToken'],
     ['3', 'Categorise To Do / In Progress / Done / Blocked', 'Analyze Sprints', 'Status category + Blocked rules'],
@@ -153,14 +157,14 @@ section('Overview');
     ['7', 'Daily sprint health summary', 'Analyze Sprints', 'Healthy / At Risk / Critical + trend vs yesterday'],
     ['8', 'Send the summary by email', 'Send One At A Time → Send Digest Email', 'SMTP, recipients from a Data Table'],
   ], { x: M, y: 1.6, w: W - 2 * M, colW: [0.5, 4.0, 3.6, 4.03], fontSize: 12 });
-  note(s, 'Common requirements: credentials only in n8n\'s credential store, sample data only, documented logic, ' + (e2e.total + 16) + ' automated tests, credential-free exports. Steps as captured from the assignment email.', 6.45);
+  note(s, pick('Common requirements: credentials only in n8n\'s credential store, sample data only, documented logic, ' + (e2e.total + 16) + ' automated tests, credential-free exports. Steps as captured from the assignment email.', 'Common requirements: credentials only in n8n\'s credential store, sample data only, documented logic, a full test matrix, credential-free exports.'), 6.45);
 }
 
 // ============================================================ 5. Architecture
 {
   const s = content();
   kicker(s, 'Architecture');
-  title(s, 'High-level system view');
+  title(s, pick('High-level system view', 'Proposed architecture'));
   const y1 = 2.0; const h = 0.85;
   box(s, 'Schedule 09:00\nManual · Webhook', 0.6, y1, 1.9, h);
   box(s, 'Config +\nData Tables', 2.95, y1, 1.8, h);
@@ -190,8 +194,8 @@ section('Overview');
   note(s, 'Dark boxes are external systems or persistent state. Dashed lines are reads of state and the error path.', 6.55);
 }
 
-// ============================================================ 6. Tech stack
-{
+// ============================================================ 6. Tech stack (detailed only)
+if (!PLAN) {
   const s = content();
   kicker(s, 'Tech stack');
   title(s, 'Six pieces, no new infrastructure');
@@ -217,7 +221,7 @@ section('Overview');
 {
   const s = content();
   kicker(s, 'n8n workflow');
-  title(s, 'Thirty nodes, twelve stages, one daily cycle');
+  title(s, pick('Thirty nodes, twelve stages, one daily cycle', 'Twelve stages, one daily cycle'));
   const st = [
     ['Triggers', 'Schedule · Manual · Webhook', BLUE], ['Config', 'Every tunable in one node', BLUE], ['Ensure Tables', 'Create Data Tables if missing', ORANGE],
     ['Load State', 'Recipients + 8 days of history', ORANGE], ['Boards', 'Paged agile call, filter boardIds', BLUE], ['Active Sprints', 'Per board, de-duplicated', BLUE],
@@ -231,12 +235,12 @@ section('Overview');
     text(s, h, { x: x + 0.85, y: y + 0.2, w: 2.8, h: 0.32, fontSize: 14, bold: true });
     text(s, b, { x: x + 0.85, y: y + 0.55, w: 2.8, h: 0.35, fontSize: 12, color: SLATE });
   });
-  note(s, 'Code-node logic lives in src/*.js with unit tests; scripts/build-workflows.js inlines it into the exported workflow JSON.', 6.6);
+  note(s, pick('Code-node logic lives in src/*.js with unit tests; scripts/build-workflows.js inlines it into the exported workflow JSON.', 'Code-node logic will live in src/*.js with unit tests and be inlined into the exported workflow JSON at build time.'), 6.6);
 }
 
 // ============================================================ 8. Section: REST
 section('Jira REST API');
-divider('01', 'Jira REST API integration', 'Talking to Jira over REST', 'Three endpoints, two pagination styles, one credential. Everything the digest knows comes from these calls.');
+if (!PLAN) divider('01', 'Jira REST API integration', 'Talking to Jira over REST', 'Three endpoints, two pagination styles, one credential. Everything the digest knows comes from these calls.');
 
 // ============================================================ 9. Endpoints
 {
@@ -265,7 +269,7 @@ Authorization: Basic base64(email:api_token)   <- n8n Jira credential`, M, 1.55,
   const s = content();
   kicker(s, 'Pagination');
   title(s, 'No 200-record ceiling this time');
-  lead(s, 'Reviewer feedback on our ServiceNow monitor: "implement API pagination to go beyond the current 200-record limit." All three Jira calls now use n8n\'s built-in HTTP pagination.', 1.5, 0.7);
+  lead(s, 'Reviewer feedback on our ServiceNow monitor: "implement API pagination to go beyond the current 200-record limit." ' + pick('All three Jira calls now use n8n\'s built-in HTTP pagination.', 'All three Jira calls will use n8n\'s built-in HTTP pagination.'), 1.5, 0.7);
   text(s, 'Agile API: offset paging', { x: M, y: 2.45, w: 5.8, h: 0.3, fontSize: 14, bold: true });
   code(s, `parameter  startAt =
   {{ $response.body.startAt
@@ -280,13 +284,13 @@ complete when
      || $response.body.isLast === true }}`, 6.9, 2.85, 5.83, 1.9, 12);
   card(s, M, 5.05, W - 2 * M, 1.25, 'FFF7F0', 'F6D3B4');
   text(s, 'Guards against bad paging', { x: M + 0.3, y: 5.2, w: 6, h: 0.3, fontSize: 14, bold: true, color: 'B45F14' });
-  text(s, 'Page cap (Config.maxPages = 50), a 200 ms gap between pages, and n8n stops if the same page comes back 5 times. Community reports describe /search/jql repeating tokens. Proven in tests: 17 issues at 5 per page = 4 requests.',
+  text(s, 'Page cap (Config.maxPages = 50), a 200 ms gap between pages, and n8n stops if the same page comes back 5 times. Community reports describe /search/jql repeating tokens. ' + pick('Proven in tests: 17 issues at 5 per page = 4 requests.', 'Example: 17 issues at 5 per page = 4 requests.'),
     { x: M + 0.3, y: 5.55, w: W - 2 * M - 0.6, h: 0.7, fontSize: 13, color: INK });
 }
 
 // ============================================================ 11. Section: rules
 section('Business rules');
-divider('02', 'Business rules & analysis', 'From raw issues to a health rating', 'How the workflow decides what is blocked, stale, overdue or overloaded, and how healthy the sprint is.');
+if (!PLAN) divider('02', 'Business rules & analysis', 'From raw issues to a health rating', 'How the workflow decides what is blocked, stale, overdue or overloaded, and how healthy the sprint is.');
 
 // ============================================================ 12. Rules table
 {
@@ -335,7 +339,7 @@ divider('02', 'Business rules & analysis', 'From raw issues to a health rating',
 {
   const s = content();
   kicker(s, 'Sample sprint');
-  title(s, 'Payments Sprint 4: what the rules find');
+  title(s, pick('Payments Sprint 4: what the rules find', 'Sample sprint: what the rules will flag'));
   const stats = [['29%', 'done (5 of 17)', INK], ['43%', 'of sprint elapsed', INK], ['3', 'blocked', RED], ['2', 'stale > 3 days', ORANGE], ['2', 'overdue', ORANGE], ['2', 'unassigned', ORANGE]];
   stats.forEach(([n, l, c], i) => {
     const x = M + i * 2.03;
@@ -349,14 +353,14 @@ divider('02', 'Business rules & analysis', 'From raw issues to a health rating',
     { x: M, y: 2.9, w: 5.9, h: 3.45, barDir: 'col', chartColors: [GRAY, BLUE, TEAL, RED], title: 'Issues by bucket', valAxisMaxVal: 6, valAxisMajorUnit: 2, ...ax });
   s.addChart(pres.charts.BAR, [{ name: 'Open issues', labels: ['Priya Raman', 'Arjun Mehta', 'Neha Kapoor', 'Rahul Verma'], values: [6, 2, 1, 1] }],
     { x: 6.85, y: 2.9, w: 5.9, h: 3.45, barDir: 'bar', chartColors: [ORANGE, 'B8C2D1', 'B8C2D1', 'B8C2D1'], title: 'Unresolved issues per member (threshold 5)', valAxisMaxVal: 7, valAxisMajorUnit: 1, catAxisOrientation: 'maxMin', ...ax });
-  note(s, 'Rating: Critical (3 blocked). Fixture data shared by the mock Jira, the unit tests and scripts/seed-jira.js.', 6.5);
+  note(s, pick('Rating: Critical (3 blocked). Fixture data shared by the mock Jira, the unit tests and scripts/seed-jira.js.', 'Rating: Critical (3 blocked). Sample data from the fixture sprint we will seed into Jira.'), 6.5);
 }
 
 // ============================================================ 15. Example email
 {
   const s = content();
-  kicker(s, 'Example');
-  title(s, 'What the team receives at 09:00');
+  kicker(s, pick('Example', 'Proposed digest'));
+  title(s, pick('What the team receives at 09:00', 'What the team will receive at 09:00'));
   s.addImage({ path: EMAIL_PNG, x: M, y: 1.45, w: 4.95, h: 5.45, altText: 'Sample digest email for Payments Sprint 4 showing Critical health, metrics, issue lists and workload table' });
   s.addShape(pres.shapes.RECTANGLE, { x: M, y: 1.45, w: 4.95, h: 5.45, fill: { type: 'none' }, line: { color: LINE, width: 0.75 } });
   const pts = [
@@ -376,17 +380,17 @@ divider('02', 'Business rules & analysis', 'From raw issues to a health rating',
 
 // ============================================================ 16. Section: reliability
 section('Reliability');
-divider('03', 'Reliability engineering', 'Acting on last round\'s feedback', 'A real database for state, exactly one digest under concurrent runs, and the bug our failure tests caught.');
+if (!PLAN) divider('03', 'Reliability engineering', 'Acting on last round\'s feedback', pick('A real database for state, exactly one digest under concurrent runs, and the bug our failure tests caught.', 'A real database for state, exactly one digest under concurrent runs, and retries that never duplicate.'));
 
 // ============================================================ 17. Feedback table
 {
   const s = content();
   kicker(s, 'Reviewer feedback');
-  title(s, 'What we changed since the ServiceNow review');
+  title(s, pick('What we changed since the ServiceNow review', 'What we will change since the ServiceNow review'));
   table(s, [
-    ['Feedback (10 Nov)', 'This project'],
+    ['Feedback (10 Nov)', pick('This project', 'Planned change')],
     ['Use a database instead of n8n static data for alert state', 'Two n8n Data Tables, created automatically and editable in the UI'],
-    ['Test concurrent executions and failure scenarios', e2e.total + ' end-to-end scenarios incl. 5 simultaneous runs, Jira outage, SMTP rejection, crash recovery'],
+    ['Test concurrent executions and failure scenarios', pick(e2e.total + ' end-to-end scenarios incl. 5 simultaneous runs, Jira outage, SMTP rejection, crash recovery', 'A test matrix with 5 simultaneous runs, Jira outage, SMTP rejection and crash recovery')],
     ['Implement pagination beyond the 200-record limit', 'Built-in HTTP pagination on all 3 Jira calls, startAt and nextPageToken'],
     ['Avoid hard-coded email addresses (other team)', 'Recipients and admins are Data Table rows with role, board and active flag'],
     ['Improve date and time-zone handling (other team)', '"Today", overdue and the dedupe key all use the team timezone; +0530 offsets parsed'],
@@ -416,8 +420,8 @@ divider('03', 'Reliability engineering', 'Acting on last round\'s feedback', 'A 
     { x: 7.0, y: 5.35, w: 5.7, h: 1.2, fontSize: 13, color: SLATE });
 }
 
-// ============================================================ 19. The race
-{
+// ============================================================ 19. The race (detailed only; the plan deck covers it in the notes)
+if (!PLAN) {
   const s = content();
   kicker(s, 'The problem');
   title(s, 'Check-then-insert races when runs overlap');
@@ -440,7 +444,7 @@ divider('03', 'Reliability engineering', 'Acting on last round\'s feedback', 'A 
 // ============================================================ 20. Claim protocol
 {
   const s = content();
-  kicker(s, 'The fix');
+  kicker(s, pick('The fix', 'The approach'));
   title(s, 'Insert a claim, read it back, lowest id wins');
   const steps = ['1. Claim (insert pending)', '2. Read back all rows', '3. Decide winner', '4. Send, record sent/failed'];
   steps.forEach((t, i) => {
@@ -471,36 +475,43 @@ return winner.id === mine.id ? win() : lose();`, M, 2.35, 6.6, 3.55, 12);
   note(s, 'At-least-once delivery: a crash after SMTP accepts but before "Record Result" can resend after 30 min. A missed digest cannot happen silently.', 6.15);
 }
 
-// ============================================================ 21. Bug found by testing
+// ============================================================ 21. Retry design (detailed: found by testing / plan: design decision)
 {
   const s = content();
-  kicker(s, 'Found by testing', RED);
-  title(s, 'Retry On Fail re-sent emails that had already gone out');
-  lead(s, 'Our SMTP-failure test rejected one email. n8n retried the whole Email node, so the digest that had already been delivered went out a second time.', 1.5, 0.7);
-  text(s, 'Before', { x: M, y: 2.45, w: 5.8, h: 0.3, fontSize: 14, bold: true, color: RED });
+  if (PLAN) {
+    kicker(s, 'Design decision');
+    title(s, 'One email per pass, so a retry never repeats a sent digest');
+    lead(s, 'n8n\'s Retry On Fail repeats the whole node. With several digests in one Email node, one rejected email would re-send the ones already delivered. We will send through a Loop Over Items node instead.', 1.5, 0.7);
+    text(s, 'Naive', { x: M, y: 2.45, w: 5.8, h: 0.3, fontSize: 14, bold: true, color: RED });
+  } else {
+    kicker(s, 'Found by testing', RED);
+    title(s, 'Retry On Fail re-sent emails that had already gone out');
+    lead(s, 'Our SMTP-failure test rejected one email. n8n retried the whole Email node, so the digest that had already been delivered went out a second time.', 1.5, 0.7);
+    text(s, 'Before', { x: M, y: 2.45, w: 5.8, h: 0.3, fontSize: 14, bold: true, color: RED });
+  }
   code(s, `Email node (2 items, retry x3)
   try 1: Payments  REJECTED
          Mobile    delivered
   try 2: Payments  delivered
          Mobile    delivered   <- duplicate`, M, 2.85, 5.85, 2.1, 12);
-  text(s, 'After', { x: 6.9, y: 2.45, w: 5.8, h: 0.3, fontSize: 14, bold: true, color: TEAL });
+  text(s, pick('After', 'Planned'), { x: 6.9, y: 2.45, w: 5.8, h: 0.3, fontSize: 14, bold: true, color: TEAL });
   code(s, `Loop Over Items (batch 1) -> Email (retry x3)
   pass 1: Payments  REJECTED
           Payments  delivered (retry)
   pass 2: Mobile    delivered
   -> each digest exactly once`, 6.9, 2.85, 5.83, 2.1, 12);
   card(s, M, 5.3, W - 2 * M, 1.0, 'EAF7F6', 'BFE6E2');
-  text(s, 'Regression test T18 replays one SMTP rejection and asserts every digest was accepted exactly once. Mocks that can inject faults are what exposed this; a happy-path demo would not have.',
-    { x: M + 0.3, y: 5.45, w: W - 2 * M - 0.6, h: 0.75, fontSize: 13, color: INK });
+  text(s, pick('Regression test T18 replays one SMTP rejection and asserts every digest was accepted exactly once. Mocks that can inject faults are what exposed this; a happy-path demo would not have.',
+    'The SMTP sink in our test plan can reject a chosen email, so this exact case is part of the test matrix: one rejection, every digest delivered exactly once.'),
+  { x: M + 0.3, y: 5.45, w: W - 2 * M - 0.6, h: 0.75, fontSize: 13, color: INK });
 }
 
 // ============================================================ 22. Error handling
 {
   const s = content();
   kicker(s, 'Error handling');
-  title(s, 'Every failure has a defined outcome');
-  table(s, [
-    ['Failure', 'What happens', 'Test'],
+  title(s, pick('Every failure has a defined outcome', 'Every failure will have a defined outcome'));
+  const rows = [
     ['Jira 429 / 5xx (transient)', '3 tries, 3 s apart; run continues', 'T06, T07'],
     ['Jira down, bad credentials, sprint call 500', 'Run fails, Error Workflow emails every admin row', 'T08, T21'],
     ['No sprint-capable boards visible', 'Explicit error naming the likely cause (permissions / boardIds)', 'T20'],
@@ -511,29 +522,42 @@ return winner.id === mine.id ? win() : lose();`, M, 2.35, 6.6, 3.55, 12);
     ['Crash between claim and send', 'Stale claim ignored after 30 min', 'T13'],
     ['Overlapping runs', 'Claim protocol: one email per sprint', 'T05, T14'],
     ['Webhook without token', 'HTTP 403, nothing runs', 'T17'],
-  ], { x: M, y: 1.6, w: W - 2 * M, colW: [3.9, 6.7, 1.53], fontSize: 12, rowH: 0.4 });
+  ];
+  if (PLAN) {
+    table(s, [['Failure', 'Planned behaviour'], ...rows.map((r) => [r[0], r[1]])],
+      { x: M, y: 1.6, w: W - 2 * M, colW: [4.4, 7.73], fontSize: 12, rowH: 0.4 });
+  } else {
+    table(s, [['Failure', 'What happens', 'Test'], ...rows], { x: M, y: 1.6, w: W - 2 * M, colW: [3.9, 6.7, 1.53], fontSize: 12, rowH: 0.4 });
+  }
 }
 
 // ============================================================ 23. Section: testing
 section('Testing');
-divider('04', 'Testing', 'Proving it under failure, not just the happy path', 'A real n8n server, a mock Jira that pages and fails on demand, and an SMTP sink that can reject mail.');
+if (!PLAN) divider('04', 'Testing', pick('Proving it under failure, not just the happy path', 'How we will prove it works under failure'),
+  pick('A real n8n server, a mock Jira that pages and fails on demand, and an SMTP sink that can reject mail.',
+    'A real n8n server against a mock Jira and a mail sink that fail on demand, then a live run on a Jira Cloud site.'));
 
 // ============================================================ 24. Test setup
 {
   const s = content();
-  kicker(s, 'Test harness');
+  kicker(s, pick('Test harness', 'Test approach'));
   title(s, 'Real n8n, fake Jira, fake mailbox');
   const y = 2.05;
   box(s, 'tests/run-e2e.js\n' + e2e.total + ' scenarios', M, y, 2.6, 1.0);
-  box(s, 'n8n 2.45.7\n(n8n start, isolated folder)', 4.2, y, 3.0, 1.0, true);
-  box(s, 'mock-jira.js :5698\npages of 1 and 5', 9.0, 1.6, 3.4, 0.85);
-  box(s, 'smtp-sink.js :2525\naccept / reject on demand', 9.0, 2.75, 3.4, 0.85);
+  box(s, pick('n8n 2.45.7', 'n8n Community Edition') + '\n(n8n start, isolated folder)', 4.2, y, 3.0, 1.0, true);
+  box(s, pick('mock-jira.js :5698', 'mock-jira.js') + '\npages of 1 and 5', 9.0, 1.6, 3.4, 0.85);
+  box(s, pick('smtp-sink.js :2525', 'smtp-sink.js') + '\naccept / reject on demand', 9.0, 2.75, 3.4, 0.85);
   arrow(s, M + 2.6, y + 0.5, 4.2, y + 0.5);
   text(s, 'webhook', { x: 3.3, y: y + 0.18, w: 0.9, h: 0.3, fontSize: 10, italic: true, color: GRAY, align: 'center' });
   arrow(s, 7.2, y + 0.3, 9.0, 2.02); arrow(s, 7.2, y + 0.7, 9.0, 3.18);
-  text(s, 'The runner also drives the mocks directly to inject faults: HTTP 500, 429, full outage, no active sprint, empty sprint, SMTP rejection.',
-    { x: M, y: 3.5, w: 8.2, h: 0.5, fontSize: 12, italic: true, color: GRAY });
-  const facts = [
+  text(s, pick('The runner also drives the mocks directly to inject faults: HTTP 500, 429, full outage, no active sprint, empty sprint, SMTP rejection.',
+    'The runner drives the mocks directly to inject faults: HTTP 500, 429, full outage, no active sprint, empty sprint, SMTP rejection.'),
+  { x: M, y: 3.5, w: 8.2, h: 0.5, fontSize: 12, italic: true, color: GRAY });
+  const facts = PLAN ? [
+    ['Same build as shipped', 'The test build differs only in Config.jiraBaseUrl and fromEmail.'],
+    ['Isolated', 'A separate N8N_USER_FOLDER with fake credentials, so no real instance or data is touched.'],
+    ['Then live', 'Seed a Jira Cloud Scrum project with the same sample sprint and repeat the key cases end to end.'],
+  ] : [
     ['Same build as shipped', 'Only Config.jiraBaseUrl and fromEmail differ in the test build.'],
     ['Isolated', 'N8N_USER_FOLDER=.n8n-test, so your real ~/.n8n is never touched. Credentials are fake.'],
     ['Why not n8n execute', 'Data Tables are disabled in the CLI runner ("module is disabled"), so tests drive a running server.'],
@@ -546,8 +570,15 @@ divider('04', 'Testing', 'Proving it under failure, not just the happy path', 'A
   });
 }
 
-// ============================================================ 25. Results
-{
+// ============================================================ 25. Results (detailed) / Test plan (plan)
+const SHORT = { T01: 'Happy path, paginated Jira', T02: 'Same-day re-run deduplicated', T03: 'Manual resend with force', T04: 'Dry run preview, no side effects',
+  T05: '5 overlapping executions', T06: 'Jira 500 twice, retried', T07: 'Jira 429 rate limit, retried', T08: 'Jira down, admin alerted',
+  T09: 'SMTP rejects a digest', T10: 'Re-run retries only the failed one', T11: 'No active sprint', T12: 'Active sprint with zero issues',
+  T13: 'Stale claim recovered', T14: 'Fresh claim, skip in-flight', T15: 'Trend vs yesterday', T16: 'No recipients configured',
+  T17: 'Webhook with wrong token', T18: 'No duplicate after SMTP retry', T19: 'Team-managed boards (simple)',
+  T20: 'No sprint-capable boards', T21: 'Sprint call 500, alerted' };
+const sortedTests = [...e2e.results].sort((a, b) => a.id.localeCompare(b.id));
+if (!PLAN) {
   const s = content();
   kicker(s, 'Test results');
   title(s, `${e2e.passed}/${e2e.total} end-to-end, 16/16 unit, all passing`);
@@ -555,16 +586,7 @@ divider('04', 'Testing', 'Proving it under failure, not just the happy path', 'A
   text(s, 'end-to-end scenarios', { x: M, y: 2.5, w: 2.6, h: 0.3, fontSize: 12, color: SLATE });
   text(s, '16/16', { x: M, y: 3.05, w: 2.6, h: 0.9, fontFace: 'Cambria', fontSize: 48, bold: true, color: TEAL });
   text(s, 'unit tests (rules, dates, claims)', { x: M, y: 3.95, w: 2.6, h: 0.3, fontSize: 12, color: SLATE });
-  text(s, '1', { x: M, y: 4.5, w: 2.6, h: 0.9, fontFace: 'Cambria', fontSize: 48, bold: true, color: RED });
-  text(s, 'real bug found and fixed (T18)', { x: M, y: 5.4, w: 2.6, h: 0.3, fontSize: 12, color: SLATE });
-  const SHORT = { T01: 'Happy path, paginated Jira', T02: 'Same-day re-run deduplicated', T03: 'Manual resend with force', T04: 'Dry run preview, no side effects',
-    T05: '5 overlapping executions', T06: 'Jira 500 twice, retried', T07: 'Jira 429 rate limit, retried', T08: 'Jira down, admin alerted',
-    T09: 'SMTP rejects a digest', T10: 'Re-run retries only the failed one', T11: 'No active sprint', T12: 'Active sprint with zero issues',
-    T13: 'Stale claim recovered', T14: 'Fresh claim, skip in-flight', T15: 'Trend vs yesterday', T16: 'No recipients configured',
-    T17: 'Webhook with wrong token', T18: 'No duplicate after SMTP retry', T19: 'Team-managed boards (simple)',
-    T20: 'No sprint-capable boards', T21: 'Sprint call 500, alerted' };
-  const sorted = [...e2e.results].sort((a, b) => a.id.localeCompare(b.id));
-  sorted.forEach((r, i) => {
+  sortedTests.forEach((r, i) => {
     const col = i % 2; const row = Math.floor(i / 2);
     const x = 3.6 + col * 4.6; const y = 1.55 + row * 0.44;
     s.addShape(pres.shapes.RECTANGLE, { x, y, w: 4.4, h: 0.38, fill: { color: 'F7F8FA' }, line: { color: LINE, width: 0.5 } });
@@ -573,10 +595,32 @@ divider('04', 'Testing', 'Proving it under failure, not just the happy path', 'A
     text(s, r.pass ? 'PASS' : 'FAIL', { x: x + 3.75, y, w: 0.55, h: 0.38, fontSize: 10.5, bold: true, color: r.pass ? TEAL : RED, valign: 'middle', align: 'right' });
   });
   note(s, `Run ${e2e.ranAt.slice(0, 16).replace('T', ' ')} UTC against the mock Jira + SMTP sink. Full expected vs actual in docs/test-results.md.`, 6.5);
+} else {
+  const s = content();
+  kicker(s, 'Test plan');
+  title(s, `${e2e.total} end-to-end scenarios, grouped by risk`);
+  const groups = [
+    ['Core flow', BLUE, ['T01', 'T02', 'T03', 'T04', 'T15']],
+    ['Concurrency & recovery', ORANGE, ['T05', 'T13', 'T14', 'T10', 'T18']],
+    ['Jira failures & edge cases', TEAL, ['T06', 'T07', 'T08', 'T21', 'T19', 'T20', 'T11', 'T12']],
+    ['Delivery & access', SLATE, ['T09', 'T16', 'T17']],
+  ];
+  groups.forEach(([g, c, ids], gi) => {
+    const x = M + gi * 3.07; const w = 2.85;
+    s.addShape(pres.shapes.RECTANGLE, { x, y: 1.6, w, h: 0.5, fill: { color: c }, line: { color: c } });
+    text(s, g, { x: x + 0.15, y: 1.6, w: w - 0.3, h: 0.5, fontSize: 13, bold: true, color: 'FFFFFF', valign: 'middle' });
+    ids.forEach((id, i) => {
+      const y = 2.22 + i * 0.5;
+      s.addShape(pres.shapes.RECTANGLE, { x, y, w, h: 0.42, fill: { color: 'F7F8FA' }, line: { color: LINE, width: 0.5 } });
+      text(s, id, { x: x + 0.12, y, w: 0.5, h: 0.42, fontSize: 11, bold: true, color: c, valign: 'middle' });
+      text(s, SHORT[id], { x: x + 0.65, y, w: w - 0.75, h: 0.42, fontSize: 11, color: INK, valign: 'middle' });
+    });
+  });
+  note(s, 'Plus 16 unit checks on the rules, timezone handling and claim logic. Each scenario records expected vs actual in docs/test-results.md.', 6.45);
 }
 
-// ============================================================ 26. Concurrency evidence
-{
+// ============================================================ 26. Concurrency evidence (detailed only)
+if (!PLAN) {
   const s = content();
   kicker(s, 'Concurrency test (T05)');
   title(s, 'Five runs at once, one email per sprint');
@@ -602,33 +646,35 @@ divider('04', 'Testing', 'Proving it under failure, not just the happy path', 'A
     { x: M + 0.3, y: 5.88, w: W - 2 * M - 0.6, h: 0.45, fontSize: 13, color: INK });
 }
 
-// ============================================================ 27. Security & config
+// ============================================================ 27. Roadmap (plan only)
 section('Wrap-up');
-{
+if (PLAN) {
   const s = content();
-  kicker(s, 'Security & configuration');
-  title(s, 'Nothing secret in the workflow, nothing specific hard-coded');
-  const items = [
-    ['Credentials', 'Jira API token, SMTP password and the webhook token live in n8n\'s encrypted credential store. Exports reference them by name only.'],
-    ['Recipients', 'Addresses are rows in sprint_digest_recipients: role, board routing, active flag. Admins get failure alerts.'],
-    ['Webhook', 'On-demand runs need the X-Digest-Token header. Wrong token gives 403 and nothing runs (T17).'],
-    ['Config node', 'Site URL, boards, timezone, thresholds, status names, field ids, page size, claim timeout, all in one place.'],
-    ['Sample data only', 'Fixture sprint shared by tests and the Jira seeder. No production data, no real colleague addresses.'],
-    ['Least privilege', 'A Jira account that can only browse the monitored projects is enough. The workflow never writes to Jira.'],
+  kicker(s, 'Roadmap');
+  title(s, 'Four phases from setup to demo');
+  const phases = [
+    ['Environment & APIs', BLUE, ['Jira Cloud site + Scrum project', 'API token, SMTP, webhook credentials', 'Seed the sample sprint', 'Confirm board, sprint, issue calls']],
+    ['Build the workflow', ORANGE, ['Fetch boards, sprints, issues', 'Rules, metrics, health rating', 'Digest email (HTML + text)', 'Recipients Data Table']],
+    ['Reliability', TEAL, ['Claim-before-send protocol', 'Per-email retries', 'Error workflow to admins', 'Daily snapshots for trends']],
+    ['Test & hand-in', SLATE, [`${e2e.total}-scenario test matrix`, 'Live run on the Jira site', 'Docs + sanitised exports', 'Short demo recording']],
   ];
-  items.forEach(([h, b], i) => {
-    const x = M + (i % 2) * 6.15; const y = 1.6 + Math.floor(i / 2) * 1.6;
-    card(s, x, y, 5.9, 1.4);
-    text(s, h, { x: x + 0.3, y: y + 0.2, w: 5.3, h: 0.32, fontSize: 15, bold: true });
-    text(s, b, { x: x + 0.3, y: y + 0.58, w: 5.35, h: 0.75, fontSize: 12, color: SLATE });
+  phases.forEach(([h, c, items], i) => {
+    const x = M + i * 3.07; const w = 2.85;
+    badge(s, i + 1, x, 1.65, c, 0.5);
+    if (i < 3) s.addShape(pres.shapes.LINE, { x: x + 0.6, y: 1.9, w: 2.4, h: 0, line: { color: LINE, width: 1.5 } });
+    card(s, x, 2.45, w, 2.75);
+    text(s, h, { x: x + 0.25, y: 2.65, w: w - 0.5, h: 0.4, fontSize: 15, bold: true, color: c });
+    s.addText(items.map((t, k) => ({ text: t, options: { bullet: true, breakLine: k < items.length - 1 } })),
+      { x: x + 0.2, y: 3.15, w: w - 0.4, h: 1.95, fontSize: 12, color: SLATE, margin: 0, valign: 'top', paraSpaceAfter: 6, isTextBox: true });
   });
+  note(s, 'Possible extensions: per-assignee nudges, Teams or Slack delivery, a sprint-end retrospective report.', 5.5);
 }
 
-// ============================================================ 28. Repository
+// ============================================================ 28. Repository / deliverables
 {
   const s = content();
-  kicker(s, 'Repository');
-  title(s, 'What we are handing in');
+  kicker(s, pick('Repository', 'Deliverables'));
+  title(s, pick('What we are handing in', 'What we will hand in'));
   const files = [
     ['workflows/*.json', 'Main workflow + error handler, credential-free'],
     ['workflows/README.md', 'Import, credentials, recipients, Config reference'],
@@ -637,7 +683,7 @@ section('Wrap-up');
     ['scripts/seed-jira.js', 'Creates the sample sprint in a real Jira site'],
     ['tests/ (mock-jira, smtp-sink, run-e2e)', e2e.total + ' e2e scenarios + 16 unit tests'],
     ['docs/architecture.md', 'Design, data model, claim protocol, error handling'],
-    ['docs/test-results.md', 'Generated: expected vs actual for every scenario'],
+    ['docs/test-results.md', pick('Generated: expected vs actual for every scenario', 'Expected vs actual for every scenario')],
   ];
   files.forEach(([f, d], i) => {
     const x = M + (i % 2) * 6.15; const y = 1.6 + Math.floor(i / 2) * 1.2;
@@ -647,28 +693,31 @@ section('Wrap-up');
   });
 }
 
-// ============================================================ 29. Next steps (dark)
-{
-  const s = pres.addSlide({ masterName: 'DARK', sectionTitle: sec });
-  text(s, 'NEXT STEPS', { x: 0.9, y: 0.9, w: 6, h: 0.3, fontSize: 12, bold: true, color: ORANGE, charSpacing: 2 });
-  text(s, 'From mock-verified to live', { x: 0.9, y: 1.3, w: 11, h: 0.8, fontFace: 'Cambria', fontSize: 34, bold: true, color: 'FFFFFF' });
-  text(s, 'Everything above is verified against a mock Jira and SMTP sink. The remaining steps need real accounts:', { x: 0.9, y: 2.2, w: 11, h: 0.4, fontSize: 15, color: 'C9D1DE' });
-  const steps = [
-    ['Jira site', 'Create a Scrum project, run scripts/seed-jira.js'],
-    ['Credentials', 'Jira API token, SMTP app password, webhook token'],
-    ['Live run', 'Dry run → real digest → same-day dedupe → error alert'],
-    ['Demo', 'Short recording of a run, the email and the Data Tables'],
-  ];
-  steps.forEach(([h, b], i) => {
-    const x = 0.9 + i * 2.95;
-    s.addShape(pres.shapes.RECTANGLE, { x, y: 3.0, w: 2.7, h: 2.2, fill: { color: '16213A' }, line: { color: '24324F' } });
-    badge(s, i + 1, x + 0.3, 3.3, [BLUE, ORANGE, TEAL, BLUE][i]);
-    text(s, h, { x: x + 0.3, y: 3.95, w: 2.2, h: 0.35, fontSize: 16, bold: true, color: 'FFFFFF' });
-    text(s, b, { x: x + 0.3, y: 4.35, w: 2.2, h: 0.8, fontSize: 12, color: 'C9D1DE' });
+if (PLAN) {
+  const NOTES = require('./plan-notes.js');
+  const slides = pres.slides || pres._slides;
+  if (slides.length !== NOTES.length) throw new Error(`plan deck has ${slides.length} slides but plan-notes.js has ${NOTES.length} entries`);
+  slides.forEach((sl, i) => {
+    const n = NOTES[i];
+    sl.addNotes([...n.say.map((t) => '- ' + t), ...(n.ask ? ['', 'If asked:', ...n.ask.map((t) => '- ' + t)] : [])].join('\n'));
   });
-  text(s, 'Possible extensions: per-assignee nudges, Teams/Slack delivery, sprint-end retrospective report, Postgres with a unique index if n8n moves to queue mode.',
-    { x: 0.9, y: 5.65, w: 11.3, h: 0.6, fontSize: 13, italic: true, color: '8A94A6' });
-  text(s, 'Sanjna J   ·   Manikonda Chethan Krishna', { x: 0.9, y: 6.55, w: 8, h: 0.35, fontSize: 13, bold: true, color: 'FFFFFF' });
+  const total = NOTES.reduce((sum, n) => { const [m, sec] = n.time.split(':').map(Number); return sum + m * 60 + sec; }, 0);
+  const md = [
+    '# Speaker notes: Jira Sprint Health Monitor (Proposed Plan)',
+    '',
+    `${NOTES.length} slides, about ${Math.round(total / 60)} minutes at the suggested pace. The same notes are in PowerPoint\'s speaker notes (View → Presenter View).`,
+    '',
+    ...NOTES.flatMap((n, i) => [
+      `## Slide ${i + 1}: ${n.title}`,
+      `*~${n.time} min*`,
+      '',
+      ...n.say.map((t) => '- ' + t),
+      ...(n.ask ? ['', '**If asked:**', ...n.ask.map((t) => '- ' + t)] : []),
+      '',
+    ]),
+  ].join('\n');
+  fs.writeFileSync(path.join(__dirname, 'Proposed-Plan-Speaker-Notes.md'), md);
+  console.log('wrote', path.join(__dirname, 'Proposed-Plan-Speaker-Notes.md'));
 }
 
 (async () => {
