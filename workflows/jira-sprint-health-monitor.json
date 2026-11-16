@@ -1,0 +1,1319 @@
+{
+  "id": "jsHealthMonitor1",
+  "name": "Jira Sprint Health Monitor & Daily Digest",
+  "active": false,
+  "nodes": [
+    {
+      "id": "sticky-1",
+      "name": "Note 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1560,
+        -300
+      ],
+      "parameters": {
+        "content": "## 1. Triggers\nWeekday 09:00 schedule (workflow timezone), manual run, or authenticated POST /webhook/sprint-health/run with optional {\"dryRun\":true} or {\"force\":true}.",
+        "width": 360,
+        "height": 760,
+        "color": 5
+      }
+    },
+    {
+      "id": "sticky-2",
+      "name": "Note 2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1300,
+        -160
+      ],
+      "parameters": {
+        "content": "## 2. Config + state\nAll tunables in Config. State lives in two n8n Data Tables (created automatically): sprint_digest_recipients (who gets the digest) and sprint_health_runs (claims + daily snapshots).",
+        "width": 1120,
+        "height": 380,
+        "color": 7
+      }
+    },
+    {
+      "id": "sticky-3",
+      "name": "Note 3",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -200,
+        -160
+      ],
+      "parameters": {
+        "content": "## 3. Jira REST (paginated)\nAgile API for boards and active sprints (startAt/isLast paging), REST v3 /search/jql for sprint issues (nextPageToken paging). 3 retries each, page cap from Config.maxPages.",
+        "width": 1360,
+        "height": 380,
+        "color": 4
+      }
+    },
+    {
+      "id": "sticky-4",
+      "name": "Note 4",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1140,
+        -160
+      ],
+      "parameters": {
+        "content": "## 4. Analyze\nBuckets To Do / In Progress / Done / Blocked, flags stale (>3d In Progress), overdue, unassigned, blocked; completion %, workload, health, day-over-day delta; renders the email.",
+        "width": 420,
+        "height": 380,
+        "color": 6
+      }
+    },
+    {
+      "id": "sticky-5",
+      "name": "Note 5",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1820,
+        -560
+      ],
+      "parameters": {
+        "content": "## 5. Claim-before-send\nInsert a pending claim, read back all claims for the same sprint+date, lowest live id wins. Loser marks itself lost. Winner emails one at a time (retries never re-send a delivered digest), then records sent/failed.",
+        "width": 2280,
+        "height": 540,
+        "color": 3
+      }
+    },
+    {
+      "id": "n001-daily-09-00-mon-fri-",
+      "name": "Daily 09:00 (Mon-Fri)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1500,
+        -120
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1-5"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n002-run-now-manual-",
+      "name": "Run Now (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1500,
+        60
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n003-run-now-webhook-",
+      "name": "Run Now (webhook)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1500,
+        240
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sprint-health/run",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "responseData": "allEntries",
+        "options": {}
+      },
+      "webhookId": "6f1d2a4e-8c3b-4f7a-9e21-5b8d7c0a1f33",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "credHookToken001",
+          "name": "Sprint digest webhook token"
+        }
+      }
+    },
+    {
+      "id": "n004-config",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1260,
+        60
+      ],
+      "parameters": {
+        "jsCode": "// All tunables in one place. Secrets live in n8n credentials; recipient\n// addresses live in the \"sprint_digest_recipients\" Data Table.\nconst CONFIG = {\n  \"jiraBaseUrl\": \"https://your-team.atlassian.net\",\n  \"boardIds\": [],\n  \"boardTypes\": [\n    \"scrum\",\n    \"simple\"\n  ],\n  \"timezone\": \"Asia/Kolkata\",\n  \"staleInProgressDays\": 3,\n  \"overloadThreshold\": 5,\n  \"blockedStatusNames\": [\n    \"Blocked\"\n  ],\n  \"flaggedField\": \"customfield_10021\",\n  \"storyPointsField\": \"customfield_10016\",\n  \"criticalBlockedCount\": 3,\n  \"criticalBehindPct\": 30,\n  \"atRiskBehindPct\": 15,\n  \"pageSize\": 100,\n  \"maxPages\": 50,\n  \"fromEmail\": \"n8n Sprint Digest <sprint-digest@your-domain.com>\",\n  \"staleClaimMinutes\": 30,\n  \"maxListItems\": 10\n};\n\nconst input = $input.first().json || {};\nconst body = input.body || {};\nconst trigger = input.body !== undefined ? 'webhook' : (input.timestamp || input['Readable date'] ? 'schedule' : 'manual');\nconst runId = 'run-' + new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + Math.random().toString(36).slice(2, 6);\nreturn [{ json: { ...CONFIG, runId, trigger, nowIso: new Date().toISOString(), dryRun: body.dryRun === true, force: body.force === true } }];"
+      }
+    },
+    {
+      "id": "n005-ensure-runs-table",
+      "name": "Ensure Runs Table",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -1040,
+        60
+      ],
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "sprint_health_runs",
+        "columns": {
+          "column": [
+            {
+              "name": "digest_key",
+              "type": "string"
+            },
+            {
+              "name": "claim_token",
+              "type": "string"
+            },
+            {
+              "name": "status",
+              "type": "string"
+            },
+            {
+              "name": "run_id",
+              "type": "string"
+            },
+            {
+              "name": "run_date",
+              "type": "string"
+            },
+            {
+              "name": "sprint_id",
+              "type": "number"
+            },
+            {
+              "name": "sprint_name",
+              "type": "string"
+            },
+            {
+              "name": "board_id",
+              "type": "number"
+            },
+            {
+              "name": "health",
+              "type": "string"
+            },
+            {
+              "name": "total_issues",
+              "type": "number"
+            },
+            {
+              "name": "todo",
+              "type": "number"
+            },
+            {
+              "name": "in_progress",
+              "type": "number"
+            },
+            {
+              "name": "done",
+              "type": "number"
+            },
+            {
+              "name": "blocked",
+              "type": "number"
+            },
+            {
+              "name": "completion_pct",
+              "type": "number"
+            },
+            {
+              "name": "elapsed_pct",
+              "type": "number"
+            },
+            {
+              "name": "stale_count",
+              "type": "number"
+            },
+            {
+              "name": "overdue_count",
+              "type": "number"
+            },
+            {
+              "name": "unassigned_count",
+              "type": "number"
+            },
+            {
+              "name": "overloaded_count",
+              "type": "number"
+            },
+            {
+              "name": "points_total",
+              "type": "number"
+            },
+            {
+              "name": "points_done",
+              "type": "number"
+            },
+            {
+              "name": "recipients_count",
+              "type": "number"
+            },
+            {
+              "name": "claimed_at",
+              "type": "string"
+            },
+            {
+              "name": "sent_at",
+              "type": "string"
+            },
+            {
+              "name": "error",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "n006-ensure-recipients-table",
+      "name": "Ensure Recipients Table",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -820,
+        60
+      ],
+      "parameters": {
+        "resource": "table",
+        "operation": "create",
+        "tableName": "sprint_digest_recipients",
+        "columns": {
+          "column": [
+            {
+              "name": "email",
+              "type": "string"
+            },
+            {
+              "name": "name",
+              "type": "string"
+            },
+            {
+              "name": "role",
+              "type": "string"
+            },
+            {
+              "name": "board_id",
+              "type": "number"
+            },
+            {
+              "name": "active",
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {
+          "createIfNotExists": true
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "id": "n007-get-recipients",
+      "name": "Get Recipients",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -600,
+        60
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "sprint_digest_recipients"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "active",
+              "condition": "isTrue",
+              "keyValue": ""
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "n008-get-recent-history",
+      "name": "Get Recent History",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        -380,
+        60
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "sprint_health_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "createdAt",
+              "condition": "gte",
+              "keyValue": "={{ new Date(Date.now() - 8 * 86400000).toISOString() }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "executeOnce": true,
+      "alwaysOutputData": true
+    },
+    {
+      "id": "n009-get-scrum-boards",
+      "name": "Get Scrum Boards",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -160,
+        60
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Config').first().json.jiraBaseUrl }}/rest/agile/1.0/board",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "maxResults",
+              "value": "={{ $('Config').first().json.pageSize }}"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "startAt",
+                    "value": "={{ $response.body.startAt + $response.body.maxResults }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ $response.body.isLast !== false }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 200
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "credJiraCloud001",
+          "name": "Jira Cloud (sprint monitor)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "executeOnce": true
+    },
+    {
+      "id": "n010-select-boards",
+      "name": "Select Boards",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        60
+      ],
+      "parameters": {
+        "jsCode": "const cfg = $('Config').first().json;\nconst wanted = (cfg.boardIds || []).map(String);\nconst types = (cfg.boardTypes || ['scrum', 'simple']).map(String);\nconst boards = [];\nfor (const page of $input.all()) for (const b of (page.json.values || [])) {\n  if (!types.includes(String(b.type))) continue; // e.g. company-managed kanban\n  if (!wanted.length || wanted.includes(String(b.id))) boards.push({ boardId: b.id, boardName: b.name, boardType: b.type });\n}\nif (!boards.length) throw new Error('No sprint-capable boards found (types ' + types.join('/') + (wanted.length ? ', boardIds ' + wanted.join(',') : '') + '). Check the Jira user can browse the project, or fix Config.boardIds / boardTypes.');\nreturn boards.map((json) => ({ json }));"
+      }
+    },
+    {
+      "id": "n011-get-active-sprints",
+      "name": "Get Active Sprints",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        280,
+        60
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Config').first().json.jiraBaseUrl }}/rest/agile/1.0/board/{{ $json.boardId }}/sprint",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "state",
+              "value": "active"
+            },
+            {
+              "name": "maxResults",
+              "value": "={{ $('Config').first().json.pageSize }}"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "startAt",
+                    "value": "={{ $response.body.startAt + $response.body.maxResults }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ $response.body.isLast !== false }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 200
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "credJiraCloud001",
+          "name": "Jira Cloud (sprint monitor)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "n012-collect-sprints",
+      "name": "Collect Sprints",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        60
+      ],
+      "parameters": {
+        "jsCode": "// One item per active sprint, de-duplicated (a sprint can show on several boards).\n// Team-managed Kanban boards report type 'simple' too; Jira answers their sprint\n// call with HTTP 400 \"does not support sprints\". Skip those, fail on anything else.\nconst seen = new Map();\nfor (const page of $input.all()) {\n  if (page.json.error) {\n    const msg = JSON.stringify(page.json.error);\n    if (/support sprints|status code 400|\"400\"|Bad request/i.test(msg)) continue;\n    throw new Error('Get Active Sprints failed: ' + ((page.json.error && page.json.error.message) || msg));\n  }\n  for (const s of (page.json.values || [])) {\n    if (s.state !== 'active' || seen.has(s.id)) continue;\n    seen.set(s.id, { sprintId: s.id, name: s.name, goal: s.goal || '', startDate: s.startDate, endDate: s.endDate,\n      boardId: s.originBoardId || s.boardId || null });\n  }\n}\nif (!seen.size) return [{ json: { noActiveSprint: true } }];\nreturn [...seen.values()].map((json) => ({ json }));"
+      }
+    },
+    {
+      "id": "n013-has-active-sprint-",
+      "name": "Has Active Sprint?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        720,
+        60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-has-sprint",
+              "leftValue": "={{ $json.noActiveSprint === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n014-no-active-sprint",
+      "name": "No Active Sprint",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        300
+      ],
+      "parameters": {
+        "jsCode": "const cfg = $('Config').first().json;\nreturn [{ json: { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, finishedAt: new Date().toISOString(),\n  sent: 0, failed: 0, status: 'no_active_sprint', sprints: [] } }];"
+      }
+    },
+    {
+      "id": "n015-get-sprint-issues",
+      "name": "Get Sprint Issues",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        960,
+        -60
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Config').first().json.jiraBaseUrl }}/rest/api/3/search/jql",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "jql",
+              "value": "=sprint = {{ $json.sprintId }} ORDER BY key"
+            },
+            {
+              "name": "fields",
+              "value": "={{ ['summary','status','assignee','duedate','priority','issuetype','created','updated','statuscategorychangedate','resolutiondate','issuelinks', $('Config').first().json.flaggedField, $('Config').first().json.storyPointsField].filter(Boolean).join(',') }}"
+            },
+            {
+              "name": "maxResults",
+              "value": "={{ $('Config').first().json.pageSize }}"
+            }
+          ]
+        },
+        "options": {
+          "pagination": {
+            "pagination": {
+              "paginationMode": "updateAParameterInEachRequest",
+              "parameters": {
+                "parameters": [
+                  {
+                    "type": "qs",
+                    "name": "nextPageToken",
+                    "value": "={{ $response.body.nextPageToken }}"
+                  }
+                ]
+              },
+              "paginationCompleteWhen": "other",
+              "completeExpression": "={{ !$response.body.nextPageToken || $response.body.isLast === true }}",
+              "limitPagesFetched": true,
+              "maxRequests": 50,
+              "requestInterval": 200
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "credJiraCloud001",
+          "name": "Jira Cloud (sprint monitor)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "id": "n016-tag-pages-with-sprint",
+      "name": "Tag Pages With Sprint",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1180,
+        -60
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Each response page from the paginated search is paired back to its sprint.\nconst s = $('Collect Sprints').item.json;\nreturn { json: { sprint: { id: s.sprintId, name: s.name, goal: s.goal, startDate: s.startDate, endDate: s.endDate, boardId: s.boardId },\n  issues: $json.issues || [] } };"
+      }
+    },
+    {
+      "id": "n017-analyze-sprints",
+      "name": "Analyze Sprints",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        -60
+      ],
+      "parameters": {
+        "jsCode": "// Analyze Sprints: the core business logic of the Jira Sprint Health Monitor.\r\n// Pure function (no n8n globals) so it can be unit-tested with plain Node and\r\n// inlined into the \"Analyze Sprints\" Code node by scripts/build-workflows.js.\r\n\r\nconst DAY_MS = 864e5;\r\n\r\n// Jira returns offsets like \"+0530\"; JS Date wants \"+05:30\".\r\nfunction parseJiraDate(s) {\r\n  if (!s) return null;\r\n  const t = Date.parse(String(s).replace(/([+-]\\d{2})(\\d{2})$/, '$1:$2'));\r\n  return Number.isNaN(t) ? null : t;\r\n}\r\n\r\n// Calendar date (YYYY-MM-DD) as seen in the configured timezone.\r\nfunction localDate(ms, timeZone) {\r\n  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })\r\n    .format(new Date(ms));\r\n}\r\n\r\nfunction daysBetweenDates(a, b) {\r\n  // whole calendar days from date string a to date string b (b - a)\r\n  return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / DAY_MS);\r\n}\r\n\r\nfunction categoryOf(fields) {\r\n  const key = fields && fields.status && fields.status.statusCategory && fields.status.statusCategory.key;\r\n  if (key === 'done') return 'done';\r\n  if (key === 'indeterminate') return 'inprogress';\r\n  return 'todo';\r\n}\r\n\r\nfunction blockedReason(fields, config) {\r\n  const statusName = ((fields.status && fields.status.name) || '').toLowerCase();\r\n  const names = (config.blockedStatusNames || []).map((s) => String(s).toLowerCase());\r\n  if (names.includes(statusName)) return 'status';\r\n  const flag = config.flaggedField ? fields[config.flaggedField] : null;\r\n  if (flag && (!Array.isArray(flag) || flag.length > 0)) return 'flagged';\r\n  for (const link of fields.issuelinks || []) {\r\n    const inward = link.type && String(link.type.inward || '').toLowerCase();\r\n    const other = link.inwardIssue;\r\n    if (inward === 'is blocked by' && other) {\r\n      const otherCat = other.fields && other.fields.status && other.fields.status.statusCategory\r\n        && other.fields.status.statusCategory.key;\r\n      if (otherCat !== 'done') return 'blocked by ' + other.key;\r\n    }\r\n  }\r\n  return null;\r\n}\r\n\r\nfunction normalizeIssue(raw, ctx) {\r\n  const { config, nowMs, today } = ctx;\r\n  const f = raw.fields || {};\r\n  const category = categoryOf(f);\r\n  const isDone = category === 'done';\r\n  const blocked = isDone ? null : blockedReason(f, config);\r\n  const catChanged = parseJiraDate(f.statuscategorychangedate);\r\n  const inProgressDays = category === 'inprogress' && catChanged != null\r\n    ? (nowMs - catChanged) / DAY_MS : null;\r\n  const due = f.duedate || null; // date-only \"YYYY-MM-DD\"\r\n  const overdueDays = due && !isDone && due < today ? daysBetweenDates(due, today) : 0;\r\n  const rawPoints = config.storyPointsField ? f[config.storyPointsField] : null;\r\n  const points = typeof rawPoints === 'number' ? rawPoints : 0;\r\n  return {\r\n    key: raw.key,\r\n    summary: f.summary || '',\r\n    status: (f.status && f.status.name) || 'Unknown',\r\n    category,\r\n    bucket: blocked ? 'Blocked' : ({ todo: 'To Do', inprogress: 'In Progress', done: 'Done' })[category],\r\n    assignee: f.assignee ? (f.assignee.displayName || f.assignee.accountId) : null,\r\n    priority: (f.priority && f.priority.name) || '',\r\n    due,\r\n    points,\r\n    inProgressDays: inProgressDays == null ? null : Math.round(inProgressDays * 10) / 10,\r\n    flags: {\r\n      stale: inProgressDays != null && inProgressDays > config.staleInProgressDays && !blocked,\r\n      overdue: overdueDays > 0,\r\n      unassigned: !f.assignee && !isDone,\r\n      blocked: !!blocked,\r\n    },\r\n    overdueDays,\r\n    blockedReason: blocked,\r\n  };\r\n}\r\n\r\nfunction healthOf(m, config) {\r\n  const reasons = [];\r\n  if (m.total === 0) return { health: 'Empty', reasons: ['Sprint has no issues'] };\r\n  const behind = m.elapsedPct - m.completionPct;\r\n  if (m.blocked >= config.criticalBlockedCount) reasons.push(`${m.blocked} issues blocked`);\r\n  if (behind >= config.criticalBehindPct) reasons.push(`${behind} pts behind schedule`);\r\n  if (reasons.length) return { health: 'Critical', reasons };\r\n  if (m.blocked > 0) reasons.push(`${m.blocked} blocked`);\r\n  if (m.overdue > 0) reasons.push(`${m.overdue} overdue`);\r\n  if (behind >= config.atRiskBehindPct) reasons.push(`${behind} pts behind schedule`);\r\n  if (m.overloaded > 0) reasons.push(`${m.overloaded} overloaded member(s)`);\r\n  if (reasons.length) return { health: 'At Risk', reasons };\r\n  return { health: 'Healthy', reasons: ['On track'] };\r\n}\r\n\r\nfunction pct(n, d) { return d > 0 ? Math.round((n / d) * 100) : 0; }\r\n\r\nfunction analyzeSprint(sprint, rawIssues, ctx) {\r\n  const { config, nowMs, today, history, recipients, runId, dryRun, force } = ctx;\r\n  // de-duplicate issues by key (defensive against overlapping pages)\r\n  const seen = new Set();\r\n  const issues = [];\r\n  for (const r of rawIssues) {\r\n    if (!r || !r.key || seen.has(r.key)) continue;\r\n    seen.add(r.key);\r\n    issues.push(normalizeIssue(r, ctx));\r\n  }\r\n  const count = (fn) => issues.filter(fn).length;\r\n  const startMs = parseJiraDate(sprint.startDate);\r\n  const endMs = parseJiraDate(sprint.endDate);\r\n  const elapsedPct = startMs && endMs && endMs > startMs\r\n    ? Math.max(0, Math.min(100, Math.round(((nowMs - startMs) / (endMs - startMs)) * 100))) : 0;\r\n  const daysLeft = endMs ? Math.max(0, Math.ceil((endMs - nowMs) / DAY_MS)) : null;\r\n\r\n  // workload per assignee (unresolved only)\r\n  const byPerson = {};\r\n  for (const i of issues) {\r\n    if (i.category === 'done' || !i.assignee) continue;\r\n    const p = byPerson[i.assignee] || (byPerson[i.assignee] = { name: i.assignee, open: 0, inProgress: 0, blocked: 0, points: 0 });\r\n    p.open += 1;\r\n    if (i.bucket === 'In Progress') p.inProgress += 1;\r\n    if (i.bucket === 'Blocked') p.blocked += 1;\r\n    p.points += i.points;\r\n  }\r\n  const workload = Object.values(byPerson)\r\n    .map((p) => ({ ...p, overloaded: p.open >= config.overloadThreshold }))\r\n    .sort((a, b) => b.open - a.open || a.name.localeCompare(b.name));\r\n\r\n  const m = {\r\n    total: issues.length,\r\n    todo: count((i) => i.bucket === 'To Do'),\r\n    inProgress: count((i) => i.bucket === 'In Progress'),\r\n    done: count((i) => i.bucket === 'Done'),\r\n    blocked: count((i) => i.bucket === 'Blocked'),\r\n    stale: count((i) => i.flags.stale),\r\n    overdue: count((i) => i.flags.overdue),\r\n    unassigned: count((i) => i.flags.unassigned),\r\n    overloaded: workload.filter((p) => p.overloaded).length,\r\n    pointsTotal: issues.reduce((s, i) => s + i.points, 0),\r\n    pointsDone: issues.filter((i) => i.category === 'done').reduce((s, i) => s + i.points, 0),\r\n    elapsedPct,\r\n    daysLeft,\r\n  };\r\n  m.completionPct = pct(m.done, m.total);\r\n  m.pointsPct = pct(m.pointsDone, m.pointsTotal);\r\n  const { health, reasons } = healthOf(m, config);\r\n\r\n  // previous sent snapshot for this sprint (strictly before today) -> day-over-day delta\r\n  const digestKey = `${sprint.id}:${today}`;\r\n  const prev = history\r\n    .filter((r) => String(r.sprint_id) === String(sprint.id) && r.status === 'sent' && r.run_date < today)\r\n    .sort((a, b) => (a.run_date < b.run_date ? 1 : -1))[0] || null;\r\n  const delta = prev ? {\r\n    since: prev.run_date,\r\n    completionPct: m.completionPct - Number(prev.completion_pct || 0),\r\n    done: m.done - Number(prev.done || 0),\r\n    blocked: m.blocked - Number(prev.blocked || 0),\r\n  } : null;\r\n\r\n  // dedupe decision against today's rows (the claim step re-checks under race)\r\n  const todays = history.filter((r) => r.digest_key === digestKey);\r\n  const staleClaimMs = config.staleClaimMinutes * 60e3;\r\n  const to = recipients\r\n    .filter((r) => r.active !== false && (r.role || 'digest') === 'digest')\r\n    .filter((r) => !Number(r.board_id) || String(r.board_id) === String(sprint.boardId))\r\n    .map((r) => String(r.email).trim()).filter(Boolean);\r\n  const uniqueTo = [...new Set(to)];\r\n  let action = 'send';\r\n  if (!uniqueTo.length) action = 'skip_no_recipients';\r\n  else if (!force && todays.some((r) => r.status === 'sent')) action = 'skip_already_sent';\r\n  else if (!force && todays.some((r) => r.status === 'pending'\r\n    && nowMs - (parseJiraDate(r.claimed_at) || 0) < staleClaimMs)) action = 'skip_in_flight';\r\n  if (dryRun && action === 'send') action = 'preview';\r\n\r\n  const lists = {\r\n    blocked: issues.filter((i) => i.flags.blocked),\r\n    stale: issues.filter((i) => i.flags.stale).sort((a, b) => b.inProgressDays - a.inProgressDays),\r\n    overdue: issues.filter((i) => i.flags.overdue).sort((a, b) => b.overdueDays - a.overdueDays),\r\n    unassigned: issues.filter((i) => i.flags.unassigned),\r\n  };\r\n\r\n  const d = {\r\n    digest_key: digestKey,\r\n    run_id: runId,\r\n    run_date: today,\r\n    sprint_id: Number(sprint.id),\r\n    sprint_name: sprint.name || `Sprint ${sprint.id}`,\r\n    board_id: Number(sprint.boardId) || 0,\r\n    sprint_goal: sprint.goal || '',\r\n    sprint_start: sprint.startDate || '',\r\n    sprint_end: sprint.endDate || '',\r\n    health,\r\n    health_reasons: reasons,\r\n    metrics: m,\r\n    workload,\r\n    lists,\r\n    delta,\r\n    recipients: uniqueTo,\r\n    action,\r\n  };\r\n  const email = renderEmail(d, config);\r\n  d.subject = email.subject;\r\n  d.html = email.html;\r\n  d.text = email.text;\r\n  return d;\r\n}\r\n\r\nfunction esc(s) {\r\n  return String(s == null ? '' : s).replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' })[c]);\r\n}\r\n\r\nconst HEALTH_COLOR = { Healthy: '#1a7f5a', 'At Risk': '#c26a00', Critical: '#c62828', Empty: '#5f6b7a' };\r\n\r\nfunction renderEmail(d, config) {\r\n  const m = d.metrics;\r\n  const browse = (k) => `${String(config.jiraBaseUrl || '').replace(/\\/+$/, '')}/browse/${k}`;\r\n  const deltaTxt = d.delta\r\n    ? `${d.delta.completionPct >= 0 ? '+' : ''}${d.delta.completionPct} pts vs ${d.delta.since}`\r\n    : 'first digest for this sprint';\r\n  const subject = `[Sprint Health] ${d.sprint_name} | ${d.health} | ${m.completionPct}% done | ${d.run_date}`;\r\n\r\n  const issueRows = (list, extra) => list.slice(0, config.maxListItems).map((i) =>\r\n    `<tr><td style=\"padding:4px 8px;width:90px\"><a href=\"${esc(browse(i.key))}\">${esc(i.key)}</a></td>`\r\n    + `<td style=\"padding:4px 8px\">${esc(i.summary)}</td>`\r\n    + `<td style=\"padding:4px 8px;width:120px\">${esc(i.assignee || 'Unassigned')}</td>`\r\n    + `<td style=\"padding:4px 8px;width:170px\">${esc(extra(i))}</td></tr>`).join('');\r\n  const section = (title, list, extra) => list.length\r\n    ? `<h3 style=\"margin:18px 0 6px;font-size:15px\">${esc(title)} (${list.length})</h3>`\r\n      + `<table style=\"border-collapse:collapse;font-size:13px;width:100%;table-layout:fixed\">${issueRows(list, extra)}</table>`\r\n      + (list.length > config.maxListItems ? `<p style=\"font-size:12px;color:#5f6b7a\">+${list.length - config.maxListItems} more</p>` : '')\r\n    : '';\r\n  const work = d.workload.map((p) =>\r\n    `<tr><td style=\"padding:4px 8px\">${esc(p.name)}${p.overloaded ? ' <b style=\"color:#c62828\">(overloaded)</b>' : ''}</td>`\r\n    + `<td style=\"padding:4px 8px;text-align:right\">${p.open}</td><td style=\"padding:4px 8px;text-align:right\">${p.inProgress}</td>`\r\n    + `<td style=\"padding:4px 8px;text-align:right\">${p.blocked}</td></tr>`).join('');\r\n\r\n  const html = `<div style=\"font-family:Segoe UI,Arial,sans-serif;color:#1b2430;max-width:720px\">\r\n<h2 style=\"margin:0 0 4px\">${esc(d.sprint_name)}: <span style=\"color:${HEALTH_COLOR[d.health]}\">${esc(d.health)}</span></h2>\r\n<p style=\"margin:0 0 12px;color:#5f6b7a\">Daily sprint health digest for ${esc(d.run_date)} (${esc(config.timezone)}). ${esc(d.health_reasons.join('; '))}.</p>\r\n${d.sprint_goal ? `<p style=\"margin:0 0 12px\"><b>Goal:</b> ${esc(d.sprint_goal)}</p>` : ''}\r\n<table style=\"border-collapse:collapse;font-size:14px;margin-bottom:8px\"><tr>\r\n<td style=\"padding:6px 12px;background:#eef2f7\"><b>${m.completionPct}%</b> done (${m.done}/${m.total})</td>\r\n<td style=\"padding:6px 12px;background:#eef2f7\"><b>${m.elapsedPct}%</b> of sprint elapsed${m.daysLeft != null ? `, ${m.daysLeft} day(s) left` : ''}</td>\r\n<td style=\"padding:6px 12px;background:#eef2f7\">${esc(deltaTxt)}</td></tr></table>\r\n<table style=\"border-collapse:collapse;font-size:14px\"><tr>\r\n<td style=\"padding:6px 12px\">To Do: <b>${m.todo}</b></td><td style=\"padding:6px 12px\">In Progress: <b>${m.inProgress}</b></td>\r\n<td style=\"padding:6px 12px\">Done: <b>${m.done}</b></td><td style=\"padding:6px 12px\">Blocked: <b>${m.blocked}</b></td></tr></table>\r\n${m.pointsTotal ? `<p style=\"font-size:13px;color:#5f6b7a\">Story points: ${m.pointsDone}/${m.pointsTotal} (${m.pointsPct}%)</p>` : ''}\r\n${section('Blocked', d.lists.blocked, (i) => i.blockedReason)}\r\n${section(`In Progress for more than ${config.staleInProgressDays} days`, d.lists.stale, (i) => `${i.inProgressDays} days`)}\r\n${section('Overdue', d.lists.overdue, (i) => `due ${i.due} (${i.overdueDays}d late)`)}\r\n${section('Unassigned', d.lists.unassigned, (i) => i.status)}\r\n${d.workload.length ? `<h3 style=\"margin:18px 0 6px;font-size:15px\">Workload (unresolved issues)</h3>\r\n<table style=\"border-collapse:collapse;font-size:13px\"><tr style=\"color:#5f6b7a\"><td style=\"padding:4px 8px\">Member</td><td style=\"padding:4px 8px\">Open</td><td style=\"padding:4px 8px\">In progress</td><td style=\"padding:4px 8px\">Blocked</td></tr>${work}</table>` : ''}\r\n<p style=\"margin-top:20px;font-size:11px;color:#8a94a3\">Generated by the n8n Jira Sprint Health Monitor. Run ${esc(d.run_id)}. Overload threshold: ${config.overloadThreshold} open issues.</p>\r\n</div>`;\r\n\r\n  const line = (title, list, extra) => list.length\r\n    ? `\\n${title} (${list.length}):\\n` + list.slice(0, config.maxListItems).map((i) => `  - ${i.key} ${i.summary} [${i.assignee || 'Unassigned'}] ${extra(i)}`).join('\\n')\r\n    : '';\r\n  const text = `${d.sprint_name}: ${d.health} (${d.health_reasons.join('; ')})\r\nDate: ${d.run_date} (${config.timezone})\r\nCompletion: ${m.completionPct}% (${m.done}/${m.total}); sprint elapsed ${m.elapsedPct}%; ${deltaTxt}\r\nTo Do ${m.todo} | In Progress ${m.inProgress} | Done ${m.done} | Blocked ${m.blocked}`\r\n    + line('Blocked', d.lists.blocked, (i) => i.blockedReason)\r\n    + line(`In Progress > ${config.staleInProgressDays} days`, d.lists.stale, (i) => `${i.inProgressDays}d`)\r\n    + line('Overdue', d.lists.overdue, (i) => `due ${i.due}`)\r\n    + line('Unassigned', d.lists.unassigned, (i) => i.status)\r\n    + (d.workload.length ? '\\n\\nWorkload: ' + d.workload.map((p) => `${p.name} ${p.open}${p.overloaded ? ' (overloaded)' : ''}`).join(', ') : '')\r\n    + '\\n';\r\n  return { subject, html, text };\r\n}\r\n\r\n// pages: [{ sprint: {id,name,boardId,startDate,endDate,goal}, issues: [...] }]\r\nfunction analyzeSprints({ pages, config, history, recipients, now, runId, dryRun, force }) {\r\n  const nowMs = now instanceof Date ? now.getTime() : Number(now);\r\n  const today = localDate(nowMs, config.timezone);\r\n  const bySprint = new Map();\r\n  for (const p of pages) {\r\n    if (!p || !p.sprint) continue;\r\n    const id = String(p.sprint.id);\r\n    if (!bySprint.has(id)) bySprint.set(id, { sprint: p.sprint, issues: [] });\r\n    bySprint.get(id).issues.push(...(p.issues || []));\r\n  }\r\n  const ctx = { config, nowMs, today, history: history || [], recipients: recipients || [], runId, dryRun: !!dryRun, force: !!force };\r\n  return [...bySprint.values()].map(({ sprint, issues }) => analyzeSprint(sprint, issues, ctx));\r\n}\r\n\r\nif (typeof module !== 'undefined' && module.exports) {\r\n  module.exports = { analyzeSprints, parseJiraDate, localDate, normalizeIssue, blockedReason, healthOf, renderEmail };\r\n}\r\n\n\n// ---- n8n wiring\nconst cfg = $('Config').first().json;\nconst rows = (name) => $(name).all().map((i) => i.json).filter((r) => r && r.id != null);\nreturn analyzeSprints({\n  pages: $input.all().map((i) => i.json),\n  config: cfg,\n  history: rows('Get Recent History'),\n  recipients: rows('Get Recipients'),\n  now: new Date(cfg.nowIso),\n  runId: cfg.runId,\n  dryRun: cfg.dryRun,\n  force: cfg.force,\n}).map((json) => ({ json }));"
+      }
+    },
+    {
+      "id": "n018-should-send-",
+      "name": "Should Send?",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        1640,
+        -240
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-send",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "send",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n019-build-claim-rows",
+      "name": "Build Claim Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1860,
+        -240
+      ],
+      "parameters": {
+        "jsCode": "// Claim BEFORE sending: this row is what survives a crash between send and save.\nconst now = new Date().toISOString();\nreturn $input.all().map(({ json: d }) => ({ json: {\n  digest_key: d.digest_key,\n  claim_token: d.run_id + ':' + Math.random().toString(36).slice(2, 10),\n  status: 'pending', run_id: d.run_id, run_date: d.run_date,\n  sprint_id: d.sprint_id, sprint_name: d.sprint_name, board_id: d.board_id, health: d.health,\n  total_issues: d.metrics.total, todo: d.metrics.todo, in_progress: d.metrics.inProgress, done: d.metrics.done,\n  blocked: d.metrics.blocked, completion_pct: d.metrics.completionPct, elapsed_pct: d.metrics.elapsedPct,\n  stale_count: d.metrics.stale, overdue_count: d.metrics.overdue, unassigned_count: d.metrics.unassigned,\n  overloaded_count: d.metrics.overloaded, points_total: d.metrics.pointsTotal, points_done: d.metrics.pointsDone,\n  recipients_count: d.recipients.length, claimed_at: now, sent_at: '', error: '',\n} }));"
+      }
+    },
+    {
+      "id": "n020-claim-digest",
+      "name": "Claim Digest",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2080,
+        -240
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "insert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "sprint_health_runs"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n021-read-back-claims",
+      "name": "Read Back Claims",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2300,
+        -240
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "sprint_health_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "digest_key",
+              "condition": "eq",
+              "keyValue": "={{ $json.digest_key }}"
+            }
+          ]
+        },
+        "returnAll": true
+      }
+    },
+    {
+      "id": "n022-decide-claims",
+      "name": "Decide Claims",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2520,
+        -240
+      ],
+      "parameters": {
+        "jsCode": "// Decide Claims: race-safe \"claim before send\" for the daily digest.\n//\n// n8n Data Tables cannot make user columns unique (only table/column names are), so \"check, then insert\" can race\n// when two executions overlap. Instead every execution INSERTS its own claim\n// row (status=pending, random claim_token), then READS BACK all rows for the\n// same digest_key. Row ids are assigned by the database in insert order, so\n// every execution sees the same ordering and agrees on one winner:\n//   * an already-'sent' row always wins (someone delivered today's digest)\n//   * otherwise the live 'pending' claim with the lowest id wins\n//   * pending claims older than staleClaimMinutes are treated as crashed runs\n//     and ignored, so a crash between claim and send can't block the digest forever\n// Losers mark their row 'lost' and send nothing.\n\nfunction decideClaims({ myClaims, rows, nowMs, staleClaimMinutes, force }) {\n  const staleMs = staleClaimMinutes * 60e3;\n  const byKey = new Map();\n  for (const r of rows) {\n    if (!r || r.digest_key == null || r.id == null) continue;\n    if (!byKey.has(r.digest_key)) byKey.set(r.digest_key, new Map());\n    byKey.get(r.digest_key).set(r.id, r); // de-duplicate by id\n  }\n  return myClaims.map((mine) => {\n    const all = [...((byKey.get(mine.digest_key) || new Map()).values())];\n    const others = all.filter((r) => r.id !== mine.id);\n    const sentElsewhere = others.find((r) => r.status === 'sent');\n    if (sentElsewhere && !force) {\n      return { id: mine.id, digest_key: mine.digest_key, claim_token: mine.claim_token, won: false, reason: `already sent by row ${sentElsewhere.id}` };\n    }\n    const live = all.filter((r) => r.status === 'pending'\n      && (r.id === mine.id || nowMs - Date.parse(r.claimed_at) < staleMs));\n    const winner = live.reduce((min, r) => (min == null || r.id < min.id ? r : min), null);\n    const won = !!winner && winner.id === mine.id;\n    return {\n      id: mine.id,\n      digest_key: mine.digest_key,\n      claim_token: mine.claim_token,\n      won,\n      reason: won ? 'lowest live claim' : `lost to row ${winner ? winner.id : '?'}`,\n    };\n  });\n}\n\nif (typeof module !== 'undefined' && module.exports) module.exports = { decideClaims };\n\n\n// ---- n8n wiring\nconst cfg = $('Config').first().json;\nreturn decideClaims({\n  myClaims: $('Claim Digest').all().map((i) => i.json),\n  rows: $input.all().map((i) => i.json),\n  nowMs: Date.now(),\n  staleClaimMinutes: cfg.staleClaimMinutes,\n  force: cfg.force,\n}).map((json) => ({ json }));"
+      }
+    },
+    {
+      "id": "n023-won-claim-",
+      "name": "Won Claim?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2740,
+        -240
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-won",
+              "leftValue": "={{ $json.won }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n024-prepare-email",
+      "name": "Prepare Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2980,
+        -360
+      ],
+      "parameters": {
+        "jsCode": "const byKey = new Map($('Analyze Sprints').all().map((i) => [i.json.digest_key, i.json]));\nreturn $input.all().map(({ json: c }) => {\n  const d = byKey.get(c.digest_key);\n  return { json: { id: c.id, digest_key: c.digest_key, to: d.recipients.join(', '), subject: d.subject, html: d.html, text: d.text } };\n});"
+      }
+    },
+    {
+      "id": "n025-send-one-at-a-time",
+      "name": "Send One At A Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        3200,
+        -360
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "n026-send-digest-email",
+      "name": "Send Digest Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        3440,
+        -440
+      ],
+      "parameters": {
+        "fromEmail": "={{ $('Config').first().json.fromEmail }}",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "both",
+        "text": "={{ $json.text }}",
+        "html": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "smtp": {
+          "id": "credSmtpDigest01",
+          "name": "SMTP (sprint digest)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "n027-resolve-claims",
+      "name": "Resolve Claims",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3660,
+        -440
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// pending -> sent | failed, keyed by the claim row id of the email that was attempted.\nconst p = $('Prepare Email').item.json;\nconst err = $json.error;\nconst ok = !err;\nreturn { json: { id: p.id, digest_key: p.digest_key, status: ok ? 'sent' : 'failed', sent_at: ok ? new Date().toISOString() : '',\n  error: ok ? '' : String((err && err.message) || err).slice(0, 500) } };"
+      }
+    },
+    {
+      "id": "n028-record-result",
+      "name": "Record Result",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        3880,
+        -440
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "sprint_health_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $json.status }}",
+            "sent_at": "={{ $json.sent_at }}",
+            "error": "={{ $json.error }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "id": "n029-mark-lost",
+      "name": "Mark Lost",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2980,
+        -120
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "sprint_health_runs"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "lost",
+            "error": "={{ $json.reason }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n030-run-summary",
+      "name": "Run Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1640,
+        120
+      ],
+      "parameters": {
+        "jsCode": "// Runs after the send branch (lower on the canvas = later in v1 execution order).\nconst cfg = $('Config').first().json;\n// Resolve Claims runs once per loop iteration, so gather every run's output.\nconst got = (n, maxRuns = 1) => {\n  if (!$(n).isExecuted) return [];\n  const out = [];\n  for (let r = 0; r < maxRuns; r++) {\n    try { out.push(...$(n).all(0, r).map((i) => i.json)); } catch (e) { break; }\n  }\n  return out;\n};\nconst loops = $('Prepare Email').isExecuted ? $('Prepare Email').all().length : 0;\nconst results = new Map(got('Resolve Claims', loops).map((r) => [r.digest_key, r]));\nconst decisions = new Map(got('Decide Claims').map((r) => [r.digest_key, r]));\nconst sprints = $input.all().map(({ json: d }) => {\n  const r = results.get(d.digest_key);\n  const c = decisions.get(d.digest_key);\n  const outcome = r ? r.status : (c && !c.won ? 'lost_race' : d.action);\n  const out = { sprint: d.sprint_name, digest_key: d.digest_key, health: d.health, completionPct: d.metrics.completionPct,\n    blocked: d.metrics.blocked, stale: d.metrics.stale, overdue: d.metrics.overdue, unassigned: d.metrics.unassigned,\n    overloaded: d.workload.filter((w) => w.overloaded).map((w) => w.name), recipients: d.recipients.length, outcome };\n  if (r && r.error) out.error = r.error;\n  if (d.action === 'preview') out.preview = { subject: d.subject, to: d.recipients, text: d.text };\n  return out;\n});\nconst failed = sprints.filter((s) => s.outcome === 'failed');\nconst summary = { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, finishedAt: new Date().toISOString(),\n  sent: sprints.filter((s) => s.outcome === 'sent').length, failed: failed.length, sprints };\nif (failed.length) {\n  // Surface the failure: the run is marked as errored and the Error Workflow emails the admins.\n  throw new Error('Digest email failed for ' + failed.map((f) => f.digest_key).join(', ') + ': ' + failed[0].error);\n}\nreturn [{ json: summary }];"
+      }
+    }
+  ],
+  "connections": {
+    "Daily 09:00 (Mon-Fri)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Now (manual)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Now (webhook)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Ensure Runs Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Runs Table": {
+      "main": [
+        [
+          {
+            "node": "Ensure Recipients Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Recipients Table": {
+      "main": [
+        [
+          {
+            "node": "Get Recipients",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Recipients": {
+      "main": [
+        [
+          {
+            "node": "Get Recent History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Recent History": {
+      "main": [
+        [
+          {
+            "node": "Get Scrum Boards",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Scrum Boards": {
+      "main": [
+        [
+          {
+            "node": "Select Boards",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Select Boards": {
+      "main": [
+        [
+          {
+            "node": "Get Active Sprints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Active Sprints": {
+      "main": [
+        [
+          {
+            "node": "Collect Sprints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect Sprints": {
+      "main": [
+        [
+          {
+            "node": "Has Active Sprint?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Active Sprint?": {
+      "main": [
+        [
+          {
+            "node": "Get Sprint Issues",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Active Sprint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Sprint Issues": {
+      "main": [
+        [
+          {
+            "node": "Tag Pages With Sprint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tag Pages With Sprint": {
+      "main": [
+        [
+          {
+            "node": "Analyze Sprints",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Sprints": {
+      "main": [
+        [
+          {
+            "node": "Should Send?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Run Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Send?": {
+      "main": [
+        [
+          {
+            "node": "Build Claim Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Claim Rows": {
+      "main": [
+        [
+          {
+            "node": "Claim Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Digest": {
+      "main": [
+        [
+          {
+            "node": "Read Back Claims",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Back Claims": {
+      "main": [
+        [
+          {
+            "node": "Decide Claims",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide Claims": {
+      "main": [
+        [
+          {
+            "node": "Won Claim?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Won Claim?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Lost",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Email": {
+      "main": [
+        [
+          {
+            "node": "Send One At A Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send One At A Time": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Send Digest Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Digest Email": {
+      "main": [
+        [
+          {
+            "node": "Resolve Claims",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve Claims": {
+      "main": [
+        [
+          {
+            "node": "Record Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Result": {
+      "main": [
+        [
+          {
+            "node": "Send One At A Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "errorWorkflow": "jsHealthErrors01",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "pinData": {},
+  "tags": []
+}

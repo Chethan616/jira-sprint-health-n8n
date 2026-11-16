@@ -1,0 +1,17 @@
+{
+  "name": "jira-sprint-health-n8n",
+  "version": "1.0.0",
+  "private": true,
+  "description": "n8n workflow: Jira sprint health monitor and daily digest",
+  "scripts": {
+    "build": "node scripts/build-workflows.js",
+    "test": "node --test tests/unit.test.js",
+    "e2e:setup": "bash tests/setup-test-env.sh",
+    "e2e": "node tests/run-e2e.js && node scripts/write-test-report.js",
+    "seed": "node scripts/seed-jira.js",
+    "deck": "node deck/build-deck.js"
+  },
+  "devDependencies": {
+    "pptxgenjs": "3.12.0"
+  }
+}

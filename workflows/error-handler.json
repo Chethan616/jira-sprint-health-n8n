@@ -1,0 +1,133 @@
+{
+  "id": "jsHealthErrors01",
+  "name": "Jira Sprint Health - Error Handler",
+  "active": false,
+  "nodes": [
+    {
+      "id": "n101-on-workflow-error",
+      "name": "On Workflow Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n102-get-admin-recipients",
+      "name": "Get Admin Recipients",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "sprint_digest_recipients"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "role",
+              "condition": "eq",
+              "keyValue": "admin"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "id": "n103-build-alert",
+      "name": "Build Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Admins come from the recipients Data Table (role = admin), never hard-coded.\nconst admins = $('Get Admin Recipients').all().map((i) => i.json)\n  .filter((r) => r.email && r.role === 'admin' && r.active !== false).map((r) => r.email);\nif (!admins.length) return [];\nconst e = $('On Workflow Error').first().json;\nconst ex = e.execution || {};\nconst err = ex.error || {};\nconst lines = [\n  'The Jira Sprint Health Monitor failed.',\n  '',\n  'Workflow:  ' + ((e.workflow && e.workflow.name) || ''),\n  'Execution: ' + (ex.id || '(not saved)'),\n  'Mode:      ' + (ex.mode || ''),\n  'Last node: ' + (ex.lastNodeExecuted || ''),\n  'Error:     ' + (err.message || 'unknown'),\n  '',\n  ex.url ? 'Open execution: ' + ex.url : '',\n];\nreturn [{ json: { to: [...new Set(admins)].join(', '), subject: '[Sprint Health] Workflow failure: ' + String(err.message || 'unknown').slice(0, 120), text: lines.join('\\n') } }];"
+      }
+    },
+    {
+      "id": "n104-email-admins",
+      "name": "Email Admins",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "fromEmail": "n8n Sprint Digest <sprint-digest@your-domain.com>",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.text }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "smtp": {
+          "id": "credSmtpDigest01",
+          "name": "SMTP (sprint digest)"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "On Workflow Error": {
+      "main": [
+        [
+          {
+            "node": "Get Admin Recipients",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Admin Recipients": {
+      "main": [
+        [
+          {
+            "node": "Build Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Alert": {
+      "main": [
+        [
+          {
+            "node": "Email Admins",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata"
+  },
+  "pinData": {},
+  "tags": []
+}

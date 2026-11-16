@@ -1,0 +1,20 @@
+# Assignment screenshots (contain colleagues' names/addresses) - never publish
+temp/
+*.jpeg
+*.jpg
+
+# Local isolated n8n test instance (fake credentials, sqlite db, logs)
+.n8n-test/
+smoke/
+
+# Secrets / environment
+.env
+*.env
+credentials.json
+
+# OS / editor / tooling
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+~$*

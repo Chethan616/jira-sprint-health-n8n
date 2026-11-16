@@ -1,0 +1,8 @@
+Jira Cloud free plan:            https://www.atlassian.com/software/jira/free
+Jira API tokens:                 https://id.atlassian.com/manage-profile/security/api-tokens
+Jira REST v3 issue search (jql): https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/
+Jira Agile REST (boards/sprints): https://developer.atlassian.com/cloud/jira/software/rest/
+n8n Community Edition:           https://n8n.io/
+n8n Data Tables:                 https://docs.n8n.io/data/data-tables/
+n8n HTTP Request pagination:     https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/
+Previous project (ServiceNow):   https://github.com/Chethan616/n8n-epsilon
