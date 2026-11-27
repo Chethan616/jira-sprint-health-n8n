@@ -1,8 +1,11 @@
 {
   "name": "jira-sprint-health-n8n",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "n8n workflow: Jira sprint health monitor and daily digest",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "node scripts/build-workflows.js",
     "test": "node --test tests/unit.test.js",
