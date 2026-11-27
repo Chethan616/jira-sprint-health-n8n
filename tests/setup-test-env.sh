@@ -25,8 +25,8 @@ JSON
 export N8N_USER_FOLDER="$(cygpath -w "$PWD/.n8n-test" 2>/dev/null || echo "$PWD/.n8n-test")" N8N_DIAGNOSTICS_ENABLED=false
 case "$N8N_USER_FOLDER" in *.n8n-test) ;; *) echo "refusing: N8N_USER_FOLDER not isolated ($N8N_USER_FOLDER)"; exit 1;; esac
 n8n import:credentials --input=.n8n-test/import/credentials.json 2>&1 | tail -1
-for f in error-handler jira-sprint-health-monitor test-helpers; do n8n import:workflow --input=.n8n-test/import/$f.json 2>&1 | tail -1; done
-for id in jsHealthErrors01 jsHealthMonitor1 jsHealthTestHlp1; do n8n publish:workflow --id=$id 2>&1 | grep -iv "note\|restart\|ignoring" | tail -1; done
+for f in jira-get error-handler jira-sprint-health-monitor test-helpers test-shipped-config; do n8n import:workflow --input=.n8n-test/import/$f.json 2>&1 | tail -1; done
+for id in jsHealthJiraGet1 jsHealthErrors01 jsHealthMonitor1 jsHealthTestHlp1 jsHealthTestCfg1; do n8n publish:workflow --id=$id 2>&1 | grep -iv "note\|restart\|ignoring" | tail -1; done
 n8n unpublish:workflow --id=smoke0000000001 >/dev/null 2>&1 || true
 (node tests/mock-jira.js > .n8n-test/mock-jira.log 2>&1 &)
 (node tests/smtp-sink.js > .n8n-test/smtp-sink.log 2>&1 &)

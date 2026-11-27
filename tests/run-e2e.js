@@ -51,6 +51,17 @@ async function scenario(id, name, expected, fn) {
 }
 
 (async () => {
+  // n8n registers published webhooks a moment after "Editor is now accessible";
+  // wait for the helper and main webhooks so the first scenarios don't race startup.
+  const ready = await waitFor(async () => {
+    try {
+      const h = await post(`${N8N}/test/runs`);
+      const m = await run({}, 'readiness-probe-wrong-token'); // 403 = registered, 404 = not yet
+      return h.status === 200 && Array.isArray(h.json) && m.status === 403;
+    } catch (e) { return false; }
+  }, 90000);
+  if (!ready) { console.error('n8n webhooks never became ready'); process.exit(1); }
+
   await scenario('T01', 'Happy path: two active sprints, paginated Jira, digest emailed',
     'Both sprints sent; Payments=Critical 29% (3 blocked, 2 stale, 2 overdue, 2 unassigned, Priya overloaded); Mobile=Healthy; 10 Jira calls incl. 3 board pages and 4 search pages',
     async () => {
@@ -137,14 +148,15 @@ async function scenario(id, name, expected, fn) {
     });
 
   await scenario('T08', 'Jira down (HTTP 500 on every call)',
-    'Run fails after retries; no digest; Error Workflow emails the admin',
+    'Run fails after 4 retries with backoff; no digest; Error Workflow emails the admin with Jira error text',
     async () => {
       await reset();
       await post(`${JIRA}/__control`, { failures: [{ match: '/rest/', status: 500, times: 100 }] });
       const res = await run();
       const alert = await waitFor(async () => (await msgs()).find((x) => x.to.join().includes('admin@test.local')));
       const digests = (await msgs()).filter((x) => x.subject.includes('% done'));
-      return { pass: res.status >= 500 && !!alert && digests.length === 0,
+      const why = alert ? alert.raw.replace(/=\r?\n/g, '') : '';
+      return { pass: res.status >= 500 && !!alert && digests.length === 0 && /Get Scrum Boards failed: Jira GET \/rest\/agile\/1\.0\/board failed after 5 attempts/.test(why),
         actual: `HTTP ${res.status}; digests=${digests.length}; admin alert="${alert ? alert.subject : 'none'}"` };
     });
 
@@ -299,9 +311,102 @@ async function scenario(id, name, expected, fn) {
       return { pass: res.status === 403 && calls.length === 0, actual: `HTTP ${res.status}; Jira calls=${calls.length}` };
     });
 
+
+  // ---------------------------------------------------------------- review follow-ups
+  const searchCalls = async (sprintId = 11) => (await jiraCalls())
+    .filter((c) => c.path.endsWith('/search/jql') && new RegExp(`sprint = ${sprintId}\\b`).test(c.query.jql || '') && !c.query.nextPageToken);
+  const gaps = (calls) => calls.slice(1).map((c, i) => Date.parse(c.at) - Date.parse(calls[i].at));
+
+  await scenario('T22', 'Sprint shown on two boards (origin board 1 + board 2): recipients of both boards, one email',
+    'Payments sent once to team@ AND mobile@ (board 2 subscriber); Mobile sent once; 2 emails, 2 sent rows',
+    async () => {
+      await reset();
+      await post(`${JIRA}/__control`, { scenario: 'shared_sprint' });
+      const res = await run();
+      const s = summary(res);
+      const m = await msgs(); const rows = await runs();
+      const pay = m.filter((x) => x.subject.includes('Payments'));
+      const p = s.sprints.find((x) => x.sprint === 'Payments Sprint 4');
+      const payTo = pay[0] ? pay[0].to.join(',') : '';
+      return { pass: res.status === 200 && pay.length === 1 && /team@test\.local/.test(payTo) && /mobile@test\.local/.test(payTo)
+          && m.length === 2 && rows.filter((r) => r.status === 'sent').length === 2 && JSON.stringify(p.boards) === '[1,2]',
+        actual: `HTTP ${res.status}; emails=${m.length}; Payments to=[${payTo}] boards=${JSON.stringify(p && p.boards)}; sent rows=${rows.filter((r) => r.status === 'sent').length}` };
+    });
+
+  await scenario('T23', 'HTTP 429 with Retry-After: 2 on issue search',
+    'Retried once after waiting >= 2 s (the Retry-After value, not a fixed delay); run succeeds',
+    async () => {
+      await reset();
+      await post(`${JIRA}/__control`, { failures: [{ match: '/search/jql', status: 429, times: 1, retryAfter: 2 }] });
+      const res = await run();
+      const calls = await searchCalls();
+      const g = gaps(calls);
+      return { pass: res.status === 200 && summary(res).sent === 2 && calls.length === 2 && calls[0].status === 429 && g[0] >= 2000,
+        actual: `HTTP ${res.status}; sent=${summary(res).sent}; first-page calls=${calls.map((c) => c.status || 200)}; wait before retry=${g[0]} ms` };
+    });
+
+  await scenario('T24', 'HTTP 503 twice without Retry-After: exponential backoff',
+    'Retries after ~0.5-1 s, then ~1-2 s (second wait >= first); run succeeds',
+    async () => {
+      await reset();
+      await post(`${JIRA}/__control`, { failures: [{ match: '/search/jql', status: 503, times: 2, retryAfter: null }] });
+      const res = await run();
+      const calls = await searchCalls();
+      const g = gaps(calls);
+      return { pass: res.status === 200 && calls.length === 3 && g[0] >= 450 && g[1] >= 950 && g[1] >= g[0],
+        actual: `HTTP ${res.status}; first-page calls=${calls.map((c) => c.status || 200)}; waits=${g.join(' ms, ')} ms` };
+    });
+
+  await scenario('T25', 'HTTP 403 on issue search is not retried',
+    'Exactly 1 search call per sprint (no pointless retries); run fails with the 403 in the alert; no digest',
+    async () => {
+      await reset();
+      await post(`${JIRA}/__control`, { failures: [{ match: '/search/jql', status: 403, times: 100 }] });
+      const res = await run();
+      const alert = await waitFor(async () => (await msgs()).find((x) => x.to.join().includes('admin@test.local')));
+      const calls = (await jiraCalls()).filter((c) => c.path.endsWith('/search/jql'));
+      const perSprint = {};
+      for (const c of calls) { const id = (/sprint = (\d+)/.exec(c.query.jql || '') || [])[1]; perSprint[id] = (perSprint[id] || 0) + 1; }
+      const digests = (await msgs()).filter((x) => x.subject.includes('% done'));
+      const why = alert ? alert.raw.replace(/=\r?\n/g, '') : '';
+      return { pass: res.status >= 500 && Object.values(perSprint).every((n) => n === 1) && !!alert && /HTTP 403/.test(why) && digests.length === 0,
+        actual: `HTTP ${res.status}; search calls per sprint=${JSON.stringify(perSprint)}; digests=${digests.length}; admin alert=${alert ? alert.subject.slice(0, 110) : 'none'}` };
+    });
+
+  await scenario('T26', 'Config validation and timezone check inside n8n',
+    'Monitor reports workflow tz = Config tz (Asia/Kolkata); a workflow on America/New_York flags the mismatch; bad values are listed; matching tz passes',
+    async () => {
+      await reset();
+      const main = summary(await run({ dryRun: true }));
+      const mismatch = summary(await post(`${N8N}/test/validate-config`, {}));
+      const fixed = summary(await post(`${N8N}/test/validate-config`, { config: { timezone: 'America/New_York' } }));
+      const bad = summary(await post(`${N8N}/test/validate-config`, { config: { timezone: 'America/New_York', overloadThreshold: 0, pageSize: 1000, timezoneTypo: 1, jiraBaseUrl: 'not a url' } }));
+      const pass = main.workflowTimezone === 'Asia/Kolkata' && main.timezone === 'Asia/Kolkata'
+        && mismatch.workflowTimezone === 'America/New_York' && mismatch.errors.length === 1 && /workflow timezone is America\/New_York/.test(mismatch.errors[0])
+        && fixed.errors.length === 0 && bad.errors.length === 3;
+      return { pass, actual: `monitor tz=${main.workflowTimezone}/${main.timezone}; NY workflow: ${mismatch.errors.length} error ("${(mismatch.errors[0] || '').slice(0, 70)}..."); matching tz: ${fixed.errors.length} errors; bad values: ${bad.errors.length} errors` ,
+        detail: { mismatch, bad } };
+    });
+
+  await scenario('T27', 'Invalid Config stops the real run before any Jira call',
+    'Shipped placeholder config (your-team.atlassian.net) fails in the Config node; 0 Jira calls; admin alerted with the problem list',
+    async () => {
+      await reset();
+      const res = await post(`${N8N}/test/run-shipped-config`, {}, { 'X-Digest-Token': TOKEN });
+      const alert = await waitFor(async () => (await msgs()).find((x) => x.to.join().includes('admin@test.local')));
+      const calls = await jiraCalls();
+      const raw = alert ? alert.raw.replace(/=\r?\n/g, '') : '';
+      return { pass: !!alert && /Invalid Config/.test(raw) && /placeholder/.test(raw) && calls.length === 0,
+        actual: `HTTP ${res.status}; Jira calls=${calls.length}; admin alert="${alert ? alert.subject.slice(0, 90) : 'none'}"` };
+    });
+
+  let n8nVersion = process.env.N8N_VERSION || '';
+  if (!n8nVersion) {
+    try { n8nVersion = require('child_process').execSync('n8n --version', { encoding: 'utf8', shell: true }).trim().split(/\s+/).pop(); } catch (e) { n8nVersion = '(unknown version)'; }
+  }
   const passed = results.filter((r) => r.pass).length;
   console.log(`\n${passed}/${results.length} passed`);
   fs.writeFileSync(path.join(__dirname, '..', 'docs', 'test-results.e2e.json'),
-    JSON.stringify({ ranAt: new Date().toISOString(), environment: 'n8n 2.45.7 (n8n start, isolated user folder) + mock Jira Cloud + SMTP sink', passed, total: results.length, results }, null, 2));
+    JSON.stringify({ ranAt: new Date().toISOString(), environment: `n8n ${n8nVersion} (n8n start, isolated user folder) + mock Jira Cloud + SMTP sink`, passed, total: results.length, results }, null, 2));
   process.exit(passed === results.length ? 0 : 1);
 })();

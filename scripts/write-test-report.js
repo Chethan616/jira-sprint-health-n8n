@@ -17,8 +17,9 @@ const md = `# Test results
 **End-to-end:** ${e2e.passed}/${e2e.total} passed · **Unit:** ${unit.filter((u) => u.pass).length}/${unit.length} passed
 
 > All end-to-end tests ran against a **local mock Jira Cloud API** (\`tests/mock-jira.js\`) and an **SMTP sink**
-> (\`tests/smtp-sink.js\`), driving a real n8n 2.45.7 server through its webhook trigger. They have **not** yet been
-> run against a live Jira Cloud site or a real mailbox; see "Live run checklist" below.
+> (\`tests/smtp-sink.js\`), driving a real n8n server (${e2e.environment.split(' (')[0]}) through its webhook trigger.
+> Live-site results go in the checklist at the end (steps in [INSTRUCTIONS.md](../INSTRUCTIONS.md#live-test-checklist)).
+> \`scripts/live-check.js\` runs the same paging/retry and Config-validation code read-only against a live Jira site.
 
 ## How to reproduce
 
@@ -46,21 +47,40 @@ one email, n8n retried the **whole node**, so the digest that had already been d
 Fix: a *Loop Over Items* node (batch size 1) in front of the Email node, so a retry only re-sends the one
 email that failed. Regression test: **T18**.
 
+## Review follow-ups and the tests that cover them
+
+| Review point | Change | Tests |
+|---|---|---|
+| Group assignees by Jira account id | Workload keyed by \`accountId\`; same display name shown as \`Name (…1a2b)\` | unit: *workload groups by accountId* |
+| Sprint shown on several boards | Collect Sprints keeps every board that lists the sprint; recipients of each board get it once (\`sprintBoardRouting\`) | unit: *sprint on several boards*; e2e **T22** |
+| Validate configuration | \`src/validate.js\` runs in the Config node and at build time: required values, ranges, URL, IANA timezone, API limits | unit: *validateConfig* ×3; e2e **T26**, **T27** |
+| Story-point progress | \`progressBasis\` (issues / points / both = lower), coverage threshold, points in email and trend | unit: *progress basis*, *story points ignored…*, *delta includes story points* |
+| Retry-After and exponential backoff | "Jira GET" sub-workflow (\`src/jira-paging.js\`): waits Retry-After / X-RateLimit-Reset, backoff with jitter on 5xx/network, no retry on other 4xx | unit: *retryAfterMs*, *backoffMs*, *paging*, *rate limits*; e2e **T06**, **T07**, **T23**, **T24**, **T25** |
+| Scheduling timezone consistency | Config node compares the workflow timezone (\`$now.zoneName\`, used by the Schedule trigger) with \`Config.timezone\` and stops on a mismatch | unit: *workflow timezone must match*; e2e **T26** |
+| Live Jira + real mailbox | \`scripts/live-check.js\` pre-flight + checklist below | manual |
+
 ## Unit tests (\`tests/unit.test.js\`)
 
 | Test | Result |
 |---|---|
 ${unit.map((u) => `| ${cell(u.name)} | ${u.pass ? 'PASS' : '**FAIL**'} |`).join('\n')}
 
-## Live run checklist (still to do on a real Jira site)
+## Live run checklist (real Jira site and mailbox)
 
-- [ ] Jira Cloud site + Scrum project created, \`scripts/seed-jira.js\` run successfully
-- [ ] n8n credentials created: Jira Software Cloud API, SMTP, Header Auth (webhook token)
-- [ ] Recipients added to the \`sprint_digest_recipients\` Data Table
-- [ ] Dry run (\`{"dryRun": true}\`) preview matches the seeded sprint
-- [ ] Real digest received in the mailbox; same-day re-run skipped
+Steps: [INSTRUCTIONS.md](../INSTRUCTIONS.md#live-test-checklist).
+
+Live run on 27 Nov 2026: the sample sprint was seeded on our Jira Cloud site and the digest arrived in a real Gmail inbox.
+
+- [x] \`scripts/seed-jira.js\` created the sample sprint on our Jira Cloud site (27 Nov 2026)
+- [ ] \`scripts/live-check.js\` → "All checks passed"
+- [ ] A deliberately wrong Config value and a workflow/Config timezone mismatch each stop the run with a clear message
+- [ ] Dry run preview matches the seeded sprint (counts, flags, story points)
+- [x] Real digest received in our Gmail inbox (27 Nov 2026)
+- [ ] Same-day re-run skipped; \`{"force": true}\` re-sends
 - [ ] Error workflow alert received after pointing Config.jiraBaseUrl at a wrong host
+- [ ] Recipient subscribed to a second board that shows the sprint receives it once
 - [ ] "In Progress > 3 days" verified after 3 real days (Jira can't backdate status changes), or with Config.staleInProgressDays = 0
+- [ ] Scheduled 09:00 run fired at 09:00 in the team's timezone
 `;
 fs.writeFileSync(path.join(ROOT, 'docs', 'test-results.md'), md);
 console.log('wrote docs/test-results.md');

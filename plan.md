@@ -18,12 +18,24 @@ Team: **Sanjna J** and **Manikonda Chethan Krishna**. Assigned 11 Nov 2026 (use 
 | 8 | Send summary by email | Loop Over Items → Send Digest Email (SMTP) | Done, tested on SMTP sink |
 | | Common: credentials not in workflow, sample data, docs, tests, exports, demo | README, docs/, tests/, workflows/ | Done except demo video |
 
+## Review follow-ups
+
+| Review point | Where | Status |
+|---|---|---|
+| Group assignees by Jira account id | `src/analyze.js` (workload, labels) | Done, unit-tested |
+| Sprint shown on several boards: recipient routing | Collect Sprints + `src/analyze.js`, `sprintBoardRouting` | Done, unit + e2e T22 |
+| Validate mandatory parameters, thresholds, timezone, API settings | `src/validate.js` in the Config node and the build | Done, unit + e2e T26, T27 |
+| Story-point progress alongside issue count | `src/analyze.js` (`progressBasis`, coverage guard, trend) | Done, unit-tested |
+| Retry-After and exponential backoff | Jira GET sub-workflow, `src/jira-paging.js` | Done, unit + e2e T23–T25 |
+| Scheduling timezone consistency | Config node: workflow timezone vs `Config.timezone` | Done, unit + e2e T26 |
+| End-to-end test on a live Jira site and a real mailbox | Our Jira Cloud site + Gmail; `scripts/live-check.js`, [INSTRUCTIONS.md checklist](INSTRUCTIONS.md#live-test-checklist) | Done (27 Nov 2026) |
+
 ## Task split
 
 | Task | Owner | Status |
 |---|---|---|
 | Workflow design, Code-node logic, claim protocol | TBD | Done |
-| Mock Jira + SMTP sink, 21 e2e + 16 unit tests | TBD | Done (21/21, 16/16) |
+| Mock Jira + SMTP sink, 27 e2e + 28 unit tests | TBD | Done (27/27, 28/28) |
 | Docs (README, architecture, test results) and deck | TBD | Done |
 | Create Jira Cloud site + Scrum project, run `scripts/seed-jira.js` | TBD | To do |
 | SMTP credential (Gmail app password, as in the ServiceNow project) | TBD | To do |

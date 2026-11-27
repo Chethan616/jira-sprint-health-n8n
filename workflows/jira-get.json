@@ -1,0 +1,267 @@
+{
+  "id": "jsHealthJiraGet1",
+  "name": "Jira Sprint Health - Jira GET",
+  "active": false,
+  "nodes": [
+    {
+      "id": "sticky-jira",
+      "name": "Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        180,
+        -300
+      ],
+      "parameters": {
+        "width": 1320,
+        "height": 220,
+        "color": 5,
+        "content": "## Jira GET with pagination + rate-limit handling\nCalled by the monitor once per request. 2xx: keep the page and fetch the next (startAt/isLast or nextPageToken). 429/503 or any Retry-After / X-RateLimit-Reset header: wait exactly that long. 408/425/5xx/network errors: exponential backoff with jitter (Config.jiraRetryBaseDelayMs x 2^attempt, capped at jiraRetryMaxDelayMs, up to jiraMaxRetries). Other 4xx: fail at once. Logic: src/jira-paging.js"
+      }
+    },
+    {
+      "id": "n301-when-called-by-monitor",
+      "name": "When Called By Monitor",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "n302-init",
+      "name": "Init",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Jira GET with pagination, Retry-After and exponential backoff.\n//\n// Used by the \"Jira Sprint Health - Jira GET\" sub-workflow, which runs this loop:\n//   Init -> Request State -> Jira Request (HTTP, full response, never error) -> Evaluate\n//        -> done?  yes -> Output\n//                  no  -> Wait (waitMs) -> Request State ...\n// n8n's built-in HTTP retry waits a fixed time and ignores Retry-After, so the\n// retry policy lives here instead, where it is unit-tested:\n//   * 2xx                 -> keep the page, request the next one (or finish)\n//   * 429 / 503 / any response with Retry-After (or X-RateLimit-Reset)\n//                         -> wait exactly what Jira asked for\n//   * 408/425/429/5xx and network errors without a hint\n//                         -> exponential backoff with jitter: base * 2^attempt, capped\n//   * other 4xx           -> fail immediately (retrying a 400/401/403/404 never helps)\n// Pure functions, no n8n globals.\n\nconst RETRYABLE_STATUS = [408, 425, 429, 500, 502, 503, 504];\n\nfunction header(headers, name) {\n  if (!headers) return undefined;\n  const want = name.toLowerCase();\n  for (const k of Object.keys(headers)) {\n    if (k.toLowerCase() === want) {\n      const v = headers[k];\n      return Array.isArray(v) ? v[0] : v;\n    }\n  }\n  return undefined;\n}\n\n// Milliseconds Jira asked us to wait, or null if it gave no hint.\n// Retry-After is either delta-seconds (\"2\") or an HTTP-date; Atlassian also sends\n// X-RateLimit-Reset as an ISO timestamp on 429s.\nfunction retryAfterMs(headers, nowMs) {\n  const ra = header(headers, 'retry-after');\n  if (ra !== undefined && ra !== null && String(ra).trim() !== '') {\n    const s = Number(String(ra).trim());\n    if (Number.isFinite(s)) return Math.max(0, Math.round(s * 1000));\n    const t = Date.parse(String(ra));\n    if (!Number.isNaN(t)) return Math.max(0, t - nowMs);\n  }\n  const reset = header(headers, 'x-ratelimit-reset');\n  if (reset) {\n    const t = Date.parse(String(reset));\n    if (!Number.isNaN(t)) return Math.max(0, t - nowMs);\n  }\n  return null;\n}\n\n// \"Equal jitter\": half the exponential step plus a random half, so retries from\n// parallel runs spread out but never collapse to ~0 ms.\nfunction backoffMs(attempt, baseMs, maxMs, random = Math.random) {\n  const step = Math.min(maxMs, baseMs * 2 ** attempt);\n  return Math.round(step / 2 + random() * (step / 2));\n}\n\n// spec (from the calling workflow):\n//   { path, query, paging: 'startAt'|'nextPageToken'|'none', context, failOnError, cfg }\nfunction initState(spec) {\n  const cfg = spec.cfg || {};\n  return {\n    url: String(cfg.jiraBaseUrl || '').replace(/\\/+$/, '') + spec.path,\n    path: spec.path,\n    query: { ...(spec.query || {}) },\n    paging: spec.paging || 'none',\n    context: spec.context === undefined ? null : spec.context,\n    failOnError: spec.failOnError !== false,\n    maxPages: Number(cfg.maxPages) || 50,\n    maxRetries: cfg.jiraMaxRetries == null ? 4 : Number(cfg.jiraMaxRetries),\n    baseDelayMs: Number(cfg.jiraRetryBaseDelayMs) || 1000,\n    maxDelayMs: Number(cfg.jiraRetryMaxDelayMs) || 30000,\n    pageIntervalMs: cfg.jiraPageIntervalMs == null ? 200 : Number(cfg.jiraPageIntervalMs),\n    cursor: null,\n    attempt: 0,\n    requests: 0,\n    retries: 0,\n    waitedMs: 0,\n    pages: [],\n    truncated: false,\n    error: null,\n  };\n}\n\n// What the HTTP node should call next.\nfunction requestFor(state) {\n  const query = { ...state.query };\n  if (state.cursor !== null && state.cursor !== undefined) {\n    if (state.paging === 'startAt') query.startAt = state.cursor;\n    if (state.paging === 'nextPageToken') query.nextPageToken = state.cursor;\n  }\n  return { url: state.url, query };\n}\n\nfunction parseBody(body) {\n  if (typeof body !== 'string') return body || {};\n  try { return JSON.parse(body); } catch (e) { return { raw: body.slice(0, 500) }; }\n}\n\nfunction describe(res, status) {\n  if (status == null) {\n    const e = (res && res.error) || {};\n    return e.message || e.description || e.code || 'network error';\n  }\n  const b = parseBody(res.body);\n  const msgs = [].concat(b.errorMessages || [], b.message || [], b.errors ? Object.values(b.errors) : [], b.raw || []);\n  return `HTTP ${status}${msgs.length ? ': ' + msgs.join('; ') : (res.statusMessage ? ' ' + res.statusMessage : '')}`;\n}\n\n// res: the HTTP node's output item json, either\n//   { statusCode, headers, body }  (full response, neverError)  or  { error: {...} } (network error)\n// returns { action: 'continue' | 'done', waitMs, state }\nfunction evaluate(state, res, { nowMs = Date.now(), random = Math.random } = {}) {\n  const s = { ...state, requests: state.requests + 1 };\n  const status = res && typeof res.statusCode === 'number' ? res.statusCode : null;\n\n  if (status !== null && status >= 200 && status < 300) {\n    const body = parseBody(res.body);\n    s.pages = [...s.pages, body];\n    s.attempt = 0;\n    let next = null;\n    if (s.paging === 'startAt' && body.isLast === false) {\n      const step = Number(body.maxResults) || (Array.isArray(body.values) ? body.values.length : 0);\n      if (step > 0) next = Number(body.startAt || 0) + step;\n    } else if (s.paging === 'nextPageToken' && body.nextPageToken && body.isLast !== true) {\n      // a repeated token would loop forever; treat it as the last page\n      if (body.nextPageToken !== s.cursor) next = body.nextPageToken;\n    }\n    if (next === null) return { action: 'done', waitMs: 0, state: s };\n    if (s.pages.length >= s.maxPages) { s.truncated = true; return { action: 'done', waitMs: 0, state: s }; }\n    s.cursor = next;\n    return { action: 'continue', waitMs: s.pageIntervalMs, state: s };\n  }\n\n  const reason = describe(res, status);\n  const retryable = status === null || RETRYABLE_STATUS.includes(status);\n  const hinted = status === null ? null : retryAfterMs(res.headers, nowMs);\n  const fail = (message) => {\n    s.error = { statusCode: status, message, attempts: s.attempt + 1 };\n    return { action: 'done', waitMs: 0, state: s };\n  };\n\n  if (!retryable) return fail(`Jira GET ${s.path} failed: ${reason}`);\n  if (s.attempt >= s.maxRetries) return fail(`Jira GET ${s.path} failed after ${s.attempt + 1} attempts: ${reason}`);\n  if (hinted !== null && hinted > s.maxDelayMs) {\n    return fail(`Jira GET ${s.path} rate-limited: Jira asked to retry after ${Math.ceil(hinted / 1000)} s, more than jiraRetryMaxDelayMs (${s.maxDelayMs} ms). ${reason}`);\n  }\n  const waitMs = hinted !== null ? hinted : backoffMs(s.attempt, s.baseDelayMs, s.maxDelayMs, random);\n  s.attempt += 1;\n  s.retries += 1;\n  s.waitedMs += waitMs;\n  s.lastRetry = { reason, waitMs, source: hinted !== null ? 'retry-after' : 'backoff' };\n  return { action: 'continue', waitMs, state: s };\n}\n\n// Items returned to the calling workflow: one per page (same shape as Jira's\n// response, plus _context and _jira stats), or a single { error } item when the\n// caller asked for failOnError=false.\nfunction outputItems(state) {\n  const meta = { requests: state.requests, retries: state.retries, waitedMs: state.waitedMs, pages: state.pages.length, truncated: state.truncated };\n  if (state.error) {\n    if (state.failOnError) throw new Error(state.error.message);\n    return [{ error: state.error, _context: state.context, _jira: meta }];\n  }\n  // an endpoint that returns a bare JSON array (e.g. /rest/api/3/field) becomes { values: [...] }\n  return state.pages.map((body) => ({ ...(Array.isArray(body) ? { values: body } : body), _context: state.context, _jira: meta }));\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = { retryAfterMs, backoffMs, initState, requestFor, evaluate, outputItems, RETRYABLE_STATUS };\n}\n\n\n// ---- n8n wiring (one request spec per sub-workflow run)\nconst items = $input.all();\nif (items.length !== 1) throw new Error('Jira GET expects exactly one request spec per call, got ' + items.length);\nconst state = initState(items[0].json);\nreturn [{ json: { state, ...requestFor(state) } }];"
+      }
+    },
+    {
+      "id": "n303-request-state",
+      "name": "Request State",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "n304-jira-request",
+      "name": "Jira Request",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "jiraSoftwareCloudApi",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.query) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "jiraSoftwareCloudApi": {
+          "id": "credJiraCloud001",
+          "name": "Jira Cloud (sprint monitor)"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "id": "n305-evaluate",
+      "name": "Evaluate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Jira GET with pagination, Retry-After and exponential backoff.\n//\n// Used by the \"Jira Sprint Health - Jira GET\" sub-workflow, which runs this loop:\n//   Init -> Request State -> Jira Request (HTTP, full response, never error) -> Evaluate\n//        -> done?  yes -> Output\n//                  no  -> Wait (waitMs) -> Request State ...\n// n8n's built-in HTTP retry waits a fixed time and ignores Retry-After, so the\n// retry policy lives here instead, where it is unit-tested:\n//   * 2xx                 -> keep the page, request the next one (or finish)\n//   * 429 / 503 / any response with Retry-After (or X-RateLimit-Reset)\n//                         -> wait exactly what Jira asked for\n//   * 408/425/429/5xx and network errors without a hint\n//                         -> exponential backoff with jitter: base * 2^attempt, capped\n//   * other 4xx           -> fail immediately (retrying a 400/401/403/404 never helps)\n// Pure functions, no n8n globals.\n\nconst RETRYABLE_STATUS = [408, 425, 429, 500, 502, 503, 504];\n\nfunction header(headers, name) {\n  if (!headers) return undefined;\n  const want = name.toLowerCase();\n  for (const k of Object.keys(headers)) {\n    if (k.toLowerCase() === want) {\n      const v = headers[k];\n      return Array.isArray(v) ? v[0] : v;\n    }\n  }\n  return undefined;\n}\n\n// Milliseconds Jira asked us to wait, or null if it gave no hint.\n// Retry-After is either delta-seconds (\"2\") or an HTTP-date; Atlassian also sends\n// X-RateLimit-Reset as an ISO timestamp on 429s.\nfunction retryAfterMs(headers, nowMs) {\n  const ra = header(headers, 'retry-after');\n  if (ra !== undefined && ra !== null && String(ra).trim() !== '') {\n    const s = Number(String(ra).trim());\n    if (Number.isFinite(s)) return Math.max(0, Math.round(s * 1000));\n    const t = Date.parse(String(ra));\n    if (!Number.isNaN(t)) return Math.max(0, t - nowMs);\n  }\n  const reset = header(headers, 'x-ratelimit-reset');\n  if (reset) {\n    const t = Date.parse(String(reset));\n    if (!Number.isNaN(t)) return Math.max(0, t - nowMs);\n  }\n  return null;\n}\n\n// \"Equal jitter\": half the exponential step plus a random half, so retries from\n// parallel runs spread out but never collapse to ~0 ms.\nfunction backoffMs(attempt, baseMs, maxMs, random = Math.random) {\n  const step = Math.min(maxMs, baseMs * 2 ** attempt);\n  return Math.round(step / 2 + random() * (step / 2));\n}\n\n// spec (from the calling workflow):\n//   { path, query, paging: 'startAt'|'nextPageToken'|'none', context, failOnError, cfg }\nfunction initState(spec) {\n  const cfg = spec.cfg || {};\n  return {\n    url: String(cfg.jiraBaseUrl || '').replace(/\\/+$/, '') + spec.path,\n    path: spec.path,\n    query: { ...(spec.query || {}) },\n    paging: spec.paging || 'none',\n    context: spec.context === undefined ? null : spec.context,\n    failOnError: spec.failOnError !== false,\n    maxPages: Number(cfg.maxPages) || 50,\n    maxRetries: cfg.jiraMaxRetries == null ? 4 : Number(cfg.jiraMaxRetries),\n    baseDelayMs: Number(cfg.jiraRetryBaseDelayMs) || 1000,\n    maxDelayMs: Number(cfg.jiraRetryMaxDelayMs) || 30000,\n    pageIntervalMs: cfg.jiraPageIntervalMs == null ? 200 : Number(cfg.jiraPageIntervalMs),\n    cursor: null,\n    attempt: 0,\n    requests: 0,\n    retries: 0,\n    waitedMs: 0,\n    pages: [],\n    truncated: false,\n    error: null,\n  };\n}\n\n// What the HTTP node should call next.\nfunction requestFor(state) {\n  const query = { ...state.query };\n  if (state.cursor !== null && state.cursor !== undefined) {\n    if (state.paging === 'startAt') query.startAt = state.cursor;\n    if (state.paging === 'nextPageToken') query.nextPageToken = state.cursor;\n  }\n  return { url: state.url, query };\n}\n\nfunction parseBody(body) {\n  if (typeof body !== 'string') return body || {};\n  try { return JSON.parse(body); } catch (e) { return { raw: body.slice(0, 500) }; }\n}\n\nfunction describe(res, status) {\n  if (status == null) {\n    const e = (res && res.error) || {};\n    return e.message || e.description || e.code || 'network error';\n  }\n  const b = parseBody(res.body);\n  const msgs = [].concat(b.errorMessages || [], b.message || [], b.errors ? Object.values(b.errors) : [], b.raw || []);\n  return `HTTP ${status}${msgs.length ? ': ' + msgs.join('; ') : (res.statusMessage ? ' ' + res.statusMessage : '')}`;\n}\n\n// res: the HTTP node's output item json, either\n//   { statusCode, headers, body }  (full response, neverError)  or  { error: {...} } (network error)\n// returns { action: 'continue' | 'done', waitMs, state }\nfunction evaluate(state, res, { nowMs = Date.now(), random = Math.random } = {}) {\n  const s = { ...state, requests: state.requests + 1 };\n  const status = res && typeof res.statusCode === 'number' ? res.statusCode : null;\n\n  if (status !== null && status >= 200 && status < 300) {\n    const body = parseBody(res.body);\n    s.pages = [...s.pages, body];\n    s.attempt = 0;\n    let next = null;\n    if (s.paging === 'startAt' && body.isLast === false) {\n      const step = Number(body.maxResults) || (Array.isArray(body.values) ? body.values.length : 0);\n      if (step > 0) next = Number(body.startAt || 0) + step;\n    } else if (s.paging === 'nextPageToken' && body.nextPageToken && body.isLast !== true) {\n      // a repeated token would loop forever; treat it as the last page\n      if (body.nextPageToken !== s.cursor) next = body.nextPageToken;\n    }\n    if (next === null) return { action: 'done', waitMs: 0, state: s };\n    if (s.pages.length >= s.maxPages) { s.truncated = true; return { action: 'done', waitMs: 0, state: s }; }\n    s.cursor = next;\n    return { action: 'continue', waitMs: s.pageIntervalMs, state: s };\n  }\n\n  const reason = describe(res, status);\n  const retryable = status === null || RETRYABLE_STATUS.includes(status);\n  const hinted = status === null ? null : retryAfterMs(res.headers, nowMs);\n  const fail = (message) => {\n    s.error = { statusCode: status, message, attempts: s.attempt + 1 };\n    return { action: 'done', waitMs: 0, state: s };\n  };\n\n  if (!retryable) return fail(`Jira GET ${s.path} failed: ${reason}`);\n  if (s.attempt >= s.maxRetries) return fail(`Jira GET ${s.path} failed after ${s.attempt + 1} attempts: ${reason}`);\n  if (hinted !== null && hinted > s.maxDelayMs) {\n    return fail(`Jira GET ${s.path} rate-limited: Jira asked to retry after ${Math.ceil(hinted / 1000)} s, more than jiraRetryMaxDelayMs (${s.maxDelayMs} ms). ${reason}`);\n  }\n  const waitMs = hinted !== null ? hinted : backoffMs(s.attempt, s.baseDelayMs, s.maxDelayMs, random);\n  s.attempt += 1;\n  s.retries += 1;\n  s.waitedMs += waitMs;\n  s.lastRetry = { reason, waitMs, source: hinted !== null ? 'retry-after' : 'backoff' };\n  return { action: 'continue', waitMs, state: s };\n}\n\n// Items returned to the calling workflow: one per page (same shape as Jira's\n// response, plus _context and _jira stats), or a single { error } item when the\n// caller asked for failOnError=false.\nfunction outputItems(state) {\n  const meta = { requests: state.requests, retries: state.retries, waitedMs: state.waitedMs, pages: state.pages.length, truncated: state.truncated };\n  if (state.error) {\n    if (state.failOnError) throw new Error(state.error.message);\n    return [{ error: state.error, _context: state.context, _jira: meta }];\n  }\n  // an endpoint that returns a bare JSON array (e.g. /rest/api/3/field) becomes { values: [...] }\n  return state.pages.map((body) => ({ ...(Array.isArray(body) ? { values: body } : body), _context: state.context, _jira: meta }));\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = { retryAfterMs, backoffMs, initState, requestFor, evaluate, outputItems, RETRYABLE_STATUS };\n}\n\n\n// ---- n8n wiring: $json is the HTTP response (full response, never-error) or { error } on a network failure\nconst prev = $('Request State').last().json;\nconst r = evaluate(prev.state, $json);\nconst out = { action: r.action, waitMs: r.waitMs, state: r.state };\nif (r.action === 'continue') Object.assign(out, requestFor(r.state));\nreturn [{ json: out }];"
+      }
+    },
+    {
+      "id": "n306-done-",
+      "name": "Done?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1100,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c-done",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "done",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n307-output",
+      "name": "Output",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        -100
+      ],
+      "parameters": {
+        "jsCode": "// Jira GET with pagination, Retry-After and exponential backoff.\n//\n// Used by the \"Jira Sprint Health - Jira GET\" sub-workflow, which runs this loop:\n//   Init -> Request State -> Jira Request (HTTP, full response, never error) -> Evaluate\n//        -> done?  yes -> Output\n//                  no  -> Wait (waitMs) -> Request State ...\n// n8n's built-in HTTP retry waits a fixed time and ignores Retry-After, so the\n// retry policy lives here instead, where it is unit-tested:\n//   * 2xx                 -> keep the page, request the next one (or finish)\n//   * 429 / 503 / any response with Retry-After (or X-RateLimit-Reset)\n//                         -> wait exactly what Jira asked for\n//   * 408/425/429/5xx and network errors without a hint\n//                         -> exponential backoff with jitter: base * 2^attempt, capped\n//   * other 4xx           -> fail immediately (retrying a 400/401/403/404 never helps)\n// Pure functions, no n8n globals.\n\nconst RETRYABLE_STATUS = [408, 425, 429, 500, 502, 503, 504];\n\nfunction header(headers, name) {\n  if (!headers) return undefined;\n  const want = name.toLowerCase();\n  for (const k of Object.keys(headers)) {\n    if (k.toLowerCase() === want) {\n      const v = headers[k];\n      return Array.isArray(v) ? v[0] : v;\n    }\n  }\n  return undefined;\n}\n\n// Milliseconds Jira asked us to wait, or null if it gave no hint.\n// Retry-After is either delta-seconds (\"2\") or an HTTP-date; Atlassian also sends\n// X-RateLimit-Reset as an ISO timestamp on 429s.\nfunction retryAfterMs(headers, nowMs) {\n  const ra = header(headers, 'retry-after');\n  if (ra !== undefined && ra !== null && String(ra).trim() !== '') {\n    const s = Number(String(ra).trim());\n    if (Number.isFinite(s)) return Math.max(0, Math.round(s * 1000));\n    const t = Date.parse(String(ra));\n    if (!Number.isNaN(t)) return Math.max(0, t - nowMs);\n  }\n  const reset = header(headers, 'x-ratelimit-reset');\n  if (reset) {\n    const t = Date.parse(String(reset));\n    if (!Number.isNaN(t)) return Math.max(0, t - nowMs);\n  }\n  return null;\n}\n\n// \"Equal jitter\": half the exponential step plus a random half, so retries from\n// parallel runs spread out but never collapse to ~0 ms.\nfunction backoffMs(attempt, baseMs, maxMs, random = Math.random) {\n  const step = Math.min(maxMs, baseMs * 2 ** attempt);\n  return Math.round(step / 2 + random() * (step / 2));\n}\n\n// spec (from the calling workflow):\n//   { path, query, paging: 'startAt'|'nextPageToken'|'none', context, failOnError, cfg }\nfunction initState(spec) {\n  const cfg = spec.cfg || {};\n  return {\n    url: String(cfg.jiraBaseUrl || '').replace(/\\/+$/, '') + spec.path,\n    path: spec.path,\n    query: { ...(spec.query || {}) },\n    paging: spec.paging || 'none',\n    context: spec.context === undefined ? null : spec.context,\n    failOnError: spec.failOnError !== false,\n    maxPages: Number(cfg.maxPages) || 50,\n    maxRetries: cfg.jiraMaxRetries == null ? 4 : Number(cfg.jiraMaxRetries),\n    baseDelayMs: Number(cfg.jiraRetryBaseDelayMs) || 1000,\n    maxDelayMs: Number(cfg.jiraRetryMaxDelayMs) || 30000,\n    pageIntervalMs: cfg.jiraPageIntervalMs == null ? 200 : Number(cfg.jiraPageIntervalMs),\n    cursor: null,\n    attempt: 0,\n    requests: 0,\n    retries: 0,\n    waitedMs: 0,\n    pages: [],\n    truncated: false,\n    error: null,\n  };\n}\n\n// What the HTTP node should call next.\nfunction requestFor(state) {\n  const query = { ...state.query };\n  if (state.cursor !== null && state.cursor !== undefined) {\n    if (state.paging === 'startAt') query.startAt = state.cursor;\n    if (state.paging === 'nextPageToken') query.nextPageToken = state.cursor;\n  }\n  return { url: state.url, query };\n}\n\nfunction parseBody(body) {\n  if (typeof body !== 'string') return body || {};\n  try { return JSON.parse(body); } catch (e) { return { raw: body.slice(0, 500) }; }\n}\n\nfunction describe(res, status) {\n  if (status == null) {\n    const e = (res && res.error) || {};\n    return e.message || e.description || e.code || 'network error';\n  }\n  const b = parseBody(res.body);\n  const msgs = [].concat(b.errorMessages || [], b.message || [], b.errors ? Object.values(b.errors) : [], b.raw || []);\n  return `HTTP ${status}${msgs.length ? ': ' + msgs.join('; ') : (res.statusMessage ? ' ' + res.statusMessage : '')}`;\n}\n\n// res: the HTTP node's output item json, either\n//   { statusCode, headers, body }  (full response, neverError)  or  { error: {...} } (network error)\n// returns { action: 'continue' | 'done', waitMs, state }\nfunction evaluate(state, res, { nowMs = Date.now(), random = Math.random } = {}) {\n  const s = { ...state, requests: state.requests + 1 };\n  const status = res && typeof res.statusCode === 'number' ? res.statusCode : null;\n\n  if (status !== null && status >= 200 && status < 300) {\n    const body = parseBody(res.body);\n    s.pages = [...s.pages, body];\n    s.attempt = 0;\n    let next = null;\n    if (s.paging === 'startAt' && body.isLast === false) {\n      const step = Number(body.maxResults) || (Array.isArray(body.values) ? body.values.length : 0);\n      if (step > 0) next = Number(body.startAt || 0) + step;\n    } else if (s.paging === 'nextPageToken' && body.nextPageToken && body.isLast !== true) {\n      // a repeated token would loop forever; treat it as the last page\n      if (body.nextPageToken !== s.cursor) next = body.nextPageToken;\n    }\n    if (next === null) return { action: 'done', waitMs: 0, state: s };\n    if (s.pages.length >= s.maxPages) { s.truncated = true; return { action: 'done', waitMs: 0, state: s }; }\n    s.cursor = next;\n    return { action: 'continue', waitMs: s.pageIntervalMs, state: s };\n  }\n\n  const reason = describe(res, status);\n  const retryable = status === null || RETRYABLE_STATUS.includes(status);\n  const hinted = status === null ? null : retryAfterMs(res.headers, nowMs);\n  const fail = (message) => {\n    s.error = { statusCode: status, message, attempts: s.attempt + 1 };\n    return { action: 'done', waitMs: 0, state: s };\n  };\n\n  if (!retryable) return fail(`Jira GET ${s.path} failed: ${reason}`);\n  if (s.attempt >= s.maxRetries) return fail(`Jira GET ${s.path} failed after ${s.attempt + 1} attempts: ${reason}`);\n  if (hinted !== null && hinted > s.maxDelayMs) {\n    return fail(`Jira GET ${s.path} rate-limited: Jira asked to retry after ${Math.ceil(hinted / 1000)} s, more than jiraRetryMaxDelayMs (${s.maxDelayMs} ms). ${reason}`);\n  }\n  const waitMs = hinted !== null ? hinted : backoffMs(s.attempt, s.baseDelayMs, s.maxDelayMs, random);\n  s.attempt += 1;\n  s.retries += 1;\n  s.waitedMs += waitMs;\n  s.lastRetry = { reason, waitMs, source: hinted !== null ? 'retry-after' : 'backoff' };\n  return { action: 'continue', waitMs, state: s };\n}\n\n// Items returned to the calling workflow: one per page (same shape as Jira's\n// response, plus _context and _jira stats), or a single { error } item when the\n// caller asked for failOnError=false.\nfunction outputItems(state) {\n  const meta = { requests: state.requests, retries: state.retries, waitedMs: state.waitedMs, pages: state.pages.length, truncated: state.truncated };\n  if (state.error) {\n    if (state.failOnError) throw new Error(state.error.message);\n    return [{ error: state.error, _context: state.context, _jira: meta }];\n  }\n  // an endpoint that returns a bare JSON array (e.g. /rest/api/3/field) becomes { values: [...] }\n  return state.pages.map((body) => ({ ...(Array.isArray(body) ? { values: body } : body), _context: state.context, _jira: meta }));\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = { retryAfterMs, backoffMs, initState, requestFor, evaluate, outputItems, RETRYABLE_STATUS };\n}\n\n\n// ---- n8n wiring: one item per page, or throw (failOnError) / an { error } item\nreturn outputItems($json.state).map((json) => ({ json }));"
+      }
+    },
+    {
+      "id": "n308-wait-retry-after-backoff-page-gap-",
+      "name": "Wait (Retry-After / backoff / page gap)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1340,
+        140
+      ],
+      "parameters": {
+        "resume": "timeInterval",
+        "amount": "={{ Math.max(0.05, $json.waitMs / 1000) }}",
+        "unit": "seconds"
+      },
+      "webhookId": "3c0f7e52-1b9d-4c55-a1f0-7d2e9b6c4a18"
+    }
+  ],
+  "connections": {
+    "When Called By Monitor": {
+      "main": [
+        [
+          {
+            "node": "Init",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Init": {
+      "main": [
+        [
+          {
+            "node": "Request State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request State": {
+      "main": [
+        [
+          {
+            "node": "Jira Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Jira Request": {
+      "main": [
+        [
+          {
+            "node": "Evaluate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate": {
+      "main": [
+        [
+          {
+            "node": "Done?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Done?": {
+      "main": [
+        [
+          {
+            "node": "Output",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait (Retry-After / backoff / page gap)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait (Retry-After / backoff / page gap)": {
+      "main": [
+        [
+          {
+            "node": "Request State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "callerPolicy": "workflowsFromSameOwner",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": true
+  },
+  "pinData": {},
+  "tags": []
+}

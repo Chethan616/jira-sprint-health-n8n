@@ -11,8 +11,9 @@ const ROOT = path.join(__dirname, '..');
 const TEST = process.argv.includes('--test');
 const src = (f) => fs.readFileSync(path.join(ROOT, 'src', f), 'utf8');
 const { DEFAULT_CONFIG } = require('../src/config.js');
+const { validateConfig } = require('../src/validate.js');
 
-const IDS = { main: 'jsHealthMonitor1', error: 'jsHealthErrors01', helpers: 'jsHealthTestHlp1' };
+const IDS = { main: 'jsHealthMonitor1', error: 'jsHealthErrors01', jira: 'jsHealthJiraGet1', helpers: 'jsHealthTestHlp1', shippedCfg: 'jsHealthTestCfg1' };
 const RUNS_TABLE = 'sprint_health_runs';
 const RECIPIENTS_TABLE = 'sprint_digest_recipients';
 const CREDS = {
@@ -25,6 +26,18 @@ const config = TEST
   ? { ...DEFAULT_CONFIG, jiraBaseUrl: 'http://localhost:5698', fromEmail: 'Sprint Digest <digest@test.local>' }
   : DEFAULT_CONFIG;
 
+// Fail the build on a broken src/config.js. The shipped defaults are placeholders
+// (your-team.atlassian.net, ...) that the Config node rejects at run time until
+// they are edited, so only those errors are allowed here.
+{
+  const { errors } = validateConfig(config, { workflowTimezone: config.timezone });
+  const real = TEST ? errors : errors.filter((e) => !/placeholder/.test(e));
+  if (real.length) {
+    console.error('src/config.js is invalid:\n  - ' + real.join('\n  - '));
+    process.exit(1);
+  }
+}
+
 const ISSUE_FIELDS = ['summary', 'status', 'assignee', 'duedate', 'priority', 'issuetype', 'created', 'updated',
   'statuscategorychangedate', 'resolutiondate', 'issuelinks'];
 
@@ -36,26 +49,25 @@ const conds = (list, matchType = 'allConditions') => ({
   matchType, filters: { conditions: list.map(([keyName, condition, keyValue]) => ({ keyName, condition, keyValue })) },
 });
 const retry = { retryOnFail: true, maxTries: 3, waitBetweenTries: 3000 };
-const jiraHttp = (name, pos, url, query, paginationParam, completeExpr, extra = {}) => node(name, 'n8n-nodes-base.httpRequest', 4.2, pos, {
-  method: 'GET',
-  url,
-  authentication: 'predefinedCredentialType',
-  nodeCredentialType: 'jiraSoftwareCloudApi',
-  sendQuery: true,
-  queryParameters: { parameters: query.map(([n, v]) => ({ name: n, value: v })) },
-  options: {
-    pagination: { pagination: {
-      paginationMode: 'updateAParameterInEachRequest',
-      parameters: { parameters: [{ type: 'qs', name: paginationParam[0], value: paginationParam[1] }] },
-      paginationCompleteWhen: 'other',
-      completeExpression: completeExpr,
-      limitPagesFetched: true,
-      maxRequests: config.maxPages,
-      requestInterval: 200,
-    } },
-    timeout: 30000,
-  },
-}, { credentials: CREDS.jira, ...retry, ...extra });
+
+// Every Jira call goes through the "Jira GET" sub-workflow (src/jira-paging.js):
+// pagination + Retry-After + exponential backoff. One sub-workflow run per input
+// item, sequentially, so a run never hammers Jira in parallel.
+const JIRA_SUB_NAME = 'Jira Sprint Health - Jira GET';
+const jiraCall = (name, pos, extra = {}) => node(name, 'n8n-nodes-base.executeWorkflow', 1.2, pos, {
+  source: 'database',
+  workflowId: { __rl: true, mode: 'list', value: IDS.jira, cachedResultName: JIRA_SUB_NAME },
+  workflowInputs: { mappingMode: 'defineBelow', value: {}, matchingColumns: [], schema: [], attemptToConvertTypes: false, convertFieldsToString: true },
+  mode: 'each',
+  options: { waitForSubWorkflow: true },
+}, extra);
+// Request spec handed to the sub-workflow (see initState in src/jira-paging.js).
+// failOnError=false everywhere: n8n replaces an error thrown inside a sub-workflow with a generic
+// "Error executing workflow", so the sub-workflow returns { error } and the calling node throws
+// with Jira's real message (which then reaches the admins).
+const JIRA_SPEC_JS = `const jiraSpec = (cfg, path, query, paging, context, failOnError = false) => ({ path, query, paging, context, failOnError,
+  cfg: { jiraBaseUrl: cfg.jiraBaseUrl, maxPages: cfg.maxPages, jiraMaxRetries: cfg.jiraMaxRetries,
+    jiraRetryBaseDelayMs: cfg.jiraRetryBaseDelayMs, jiraRetryMaxDelayMs: cfg.jiraRetryMaxDelayMs, jiraPageIntervalMs: cfg.jiraPageIntervalMs } });`;
 
 const RUN_COLUMNS = [
   ['digest_key', 'string'], ['claim_token', 'string'], ['status', 'string'], ['run_id', 'string'], ['run_date', 'string'],
@@ -73,51 +85,93 @@ const createTable = (name, pos, table, cols) => node(name, 'n8n-nodes-base.dataT
 }, { executeOnce: true });
 
 // ------------------------------------------------------------------ main workflow
-function mainWorkflow() {
+// cfg/meta overrides exist only for the test build (a copy with the shipped placeholder Config).
+function mainWorkflow(cfg = config, meta = {}) {
   nid = 0;
   const cfgJs = `// All tunables in one place. Secrets live in n8n credentials; recipient
 // addresses live in the "${RECIPIENTS_TABLE}" Data Table.
-const CONFIG = ${JSON.stringify(config, null, 2)};
+const CONFIG = ${JSON.stringify(cfg, null, 2)};
+
+// ---- validation (src/validate.js): a bad value stops the run here, before any
+// Jira call or email, and the Error Workflow emails the admins the list.
+${src('validate.js')}
+
+// $now is in the WORKFLOW timezone, the one the Schedule trigger fires in.
+const workflowTimezone = (typeof $now !== 'undefined' && $now && $now.zoneName) || '';
+const check = validateConfig(CONFIG, { workflowTimezone });
+if (check.errors.length) {
+  throw new Error('Invalid Config (' + check.errors.length + ' problem' + (check.errors.length > 1 ? 's' : '') + '; edit the Config node or Workflow Settings): '
+    + check.errors.join(' | '));
+}
 
 const input = $input.first().json || {};
 const body = input.body || {};
 const trigger = input.body !== undefined ? 'webhook' : (input.timestamp || input['Readable date'] ? 'schedule' : 'manual');
 const runId = 'run-' + new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + Math.random().toString(36).slice(2, 6);
-return [{ json: { ...CONFIG, runId, trigger, nowIso: new Date().toISOString(), dryRun: body.dryRun === true, force: body.force === true } }];`;
+return [{ json: { ...CONFIG, runId, trigger, workflowTimezone, configWarnings: check.warnings,
+  nowIso: new Date().toISOString(), dryRun: body.dryRun === true, force: body.force === true } }];`;
 
-  const selectBoardsJs = `const cfg = $('Config').first().json;
+  const boardsRequestJs = `${JIRA_SPEC_JS}
+const cfg = $('Config').first().json;
+return [{ json: jiraSpec(cfg, '/rest/agile/1.0/board', { maxResults: cfg.pageSize }, 'startAt', null) }];`;
+
+  const selectBoardsJs = `${JIRA_SPEC_JS}
+const cfg = $('Config').first().json;
 const wanted = (cfg.boardIds || []).map(String);
 const types = (cfg.boardTypes || ['scrum', 'simple']).map(String);
 const boards = [];
-for (const page of $input.all()) for (const b of (page.json.values || [])) {
+for (const page of $input.all()) {
+  if (page.json.error) throw new Error('Get Scrum Boards failed: ' + page.json.error.message);
+  for (const b of (page.json.values || [])) {
   if (!types.includes(String(b.type))) continue; // e.g. company-managed kanban
   if (!wanted.length || wanted.includes(String(b.id))) boards.push({ boardId: b.id, boardName: b.name, boardType: b.type });
+  }
 }
 if (!boards.length) throw new Error('No sprint-capable boards found (types ' + types.join('/') + (wanted.length ? ', boardIds ' + wanted.join(',') : '') + '). Check the Jira user can browse the project, or fix Config.boardIds / boardTypes.');
-return boards.map((json) => ({ json }));`;
+// failOnError=false: a team-managed Kanban board answers 400 and Collect Sprints skips it
+return boards.map((b) => ({ json: jiraSpec(cfg, '/rest/agile/1.0/board/' + b.boardId + '/sprint',
+  { state: 'active', maxResults: cfg.pageSize }, 'startAt', b, false) }));`;
 
   const collectSprintsJs = `// One item per active sprint, de-duplicated (a sprint can show on several boards).
 // Team-managed Kanban boards report type 'simple' too; Jira answers their sprint
 // call with HTTP 400 "does not support sprints". Skip those, fail on anything else.
+// A sprint is listed by its origin board AND by every other board whose filter
+// includes its issues. Keep one item per sprint but remember all of those boards,
+// so recipients of each board are routed correctly (see Analyze Sprints).
+const boardNames = new Map($('Select Boards').all().map((i) => [String(i.json.context.boardId), i.json.context.boardName]));
 const seen = new Map();
 for (const page of $input.all()) {
-  if (page.json.error) {
-    const msg = JSON.stringify(page.json.error);
-    if (/support sprints|status code 400|"400"|Bad request/i.test(msg)) continue;
-    throw new Error('Get Active Sprints failed: ' + ((page.json.error && page.json.error.message) || msg));
+  const err = page.json.error;
+  if (err) {
+    if (err.statusCode === 400 || /support sprints/i.test(String(err.message))) continue;
+    throw new Error('Get Active Sprints failed: ' + (err.message || JSON.stringify(err)));
   }
+  const listedOn = page.json._context || {};
   for (const s of (page.json.values || [])) {
-    if (s.state !== 'active' || seen.has(s.id)) continue;
-    seen.set(s.id, { sprintId: s.id, name: s.name, goal: s.goal || '', startDate: s.startDate, endDate: s.endDate,
-      boardId: s.originBoardId || s.boardId || null });
+    if (s.state !== 'active') continue;
+    if (!seen.has(s.id)) {
+      seen.set(s.id, { sprintId: s.id, name: s.name, goal: s.goal || '', startDate: s.startDate, endDate: s.endDate,
+        boardId: s.originBoardId || listedOn.boardId || null, boards: [] });
+    }
+    const e = seen.get(s.id);
+    for (const id of [s.originBoardId, listedOn.boardId]) {
+      if (id && !e.boards.some((b) => String(b.id) === String(id))) e.boards.push({ id: Number(id), name: boardNames.get(String(id)) || '' });
+    }
   }
 }
 if (!seen.size) return [{ json: { noActiveSprint: true } }];
 return [...seen.values()].map((json) => ({ json }));`;
 
-  const tagPagesJs = `// Each response page from the paginated search is paired back to its sprint.
-const s = $('Collect Sprints').item.json;
-return { json: { sprint: { id: s.sprintId, name: s.name, goal: s.goal, startDate: s.startDate, endDate: s.endDate, boardId: s.boardId },
+  const issuesRequestJs = `${JIRA_SPEC_JS}
+const cfg = $('Config').first().json;
+const fields = ['${ISSUE_FIELDS.join("','")}', cfg.flaggedField, cfg.storyPointsField].filter(Boolean).join(',');
+return $input.all().map(({ json: s }) => ({ json: jiraSpec(cfg, '/rest/api/3/search/jql',
+  { jql: 'sprint = ' + s.sprintId + ' ORDER BY key', fields, maxResults: cfg.pageSize }, 'nextPageToken', s) }));`;
+
+  const tagPagesJs = `// Each response page carries the sprint it was fetched for (_context).
+const s = $json._context;
+if ($json.error) throw new Error('Get Sprint Issues failed for sprint ' + s.sprintId + ' (' + s.name + '): ' + $json.error.message);
+return { json: { sprint: { id: s.sprintId, name: s.name, goal: s.goal, startDate: s.startDate, endDate: s.endDate, boardId: s.boardId, boards: s.boards || [] },
   issues: $json.issues || [] } };`;
 
   const analyzeJs = `${src('analyze.js')}
@@ -194,14 +248,17 @@ const sprints = $input.all().map(({ json: d }) => {
   const c = decisions.get(d.digest_key);
   const outcome = r ? r.status : (c && !c.won ? 'lost_race' : d.action);
   const out = { sprint: d.sprint_name, digest_key: d.digest_key, health: d.health, completionPct: d.metrics.completionPct,
+    pointsPct: d.metrics.pointsPct, progressPct: d.metrics.progressPct, progressBy: d.metrics.progressBy, boards: d.board_ids,
     blocked: d.metrics.blocked, stale: d.metrics.stale, overdue: d.metrics.overdue, unassigned: d.metrics.unassigned,
     overloaded: d.workload.filter((w) => w.overloaded).map((w) => w.name), recipients: d.recipients.length, outcome };
+  if (d.action === 'send' || d.action === 'preview') out.to = d.recipients;
   if (r && r.error) out.error = r.error;
   if (d.action === 'preview') out.preview = { subject: d.subject, to: d.recipients, text: d.text };
   return out;
 });
 const failed = sprints.filter((s) => s.outcome === 'failed');
 const summary = { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, finishedAt: new Date().toISOString(),
+  timezone: cfg.timezone, workflowTimezone: cfg.workflowTimezone, configWarnings: cfg.configWarnings || [],
   sent: sprints.filter((s) => s.outcome === 'sent').length, failed: failed.length, sprints };
 if (failed.length) {
   // Surface the failure: the run is marked as errored and the Error Workflow emails the admins.
@@ -211,6 +268,7 @@ return [{ json: summary }];`;
 
   const noSprintJs = `const cfg = $('Config').first().json;
 return [{ json: { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, finishedAt: new Date().toISOString(),
+  timezone: cfg.timezone, workflowTimezone: cfg.workflowTimezone, configWarnings: cfg.configWarnings || [],
   sent: 0, failed: 0, status: 'no_active_sprint', sprints: [] } }];`;
 
   const n = {};
@@ -219,9 +277,9 @@ return [{ json: { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, fi
     { rule: { interval: [{ field: 'cronExpression', expression: '0 9 * * 1-5' }] } }));
   add(node('Run Now (manual)', 'n8n-nodes-base.manualTrigger', 1, [-1500, 60], {}));
   add(node('Run Now (webhook)', 'n8n-nodes-base.webhook', 2, [-1500, 240], {
-    httpMethod: 'POST', path: 'sprint-health/run', authentication: 'headerAuth',
+    httpMethod: 'POST', path: meta.webhookPath || 'sprint-health/run', authentication: 'headerAuth',
     responseMode: 'lastNode', responseData: 'allEntries', options: {},
-  }, { webhookId: '6f1d2a4e-8c3b-4f7a-9e21-5b8d7c0a1f33', credentials: CREDS.hook }));
+  }, { webhookId: meta.webhookId || '6f1d2a4e-8c3b-4f7a-9e21-5b8d7c0a1f33', credentials: CREDS.hook }));
   add(node('Config', 'n8n-nodes-base.code', 2, [-1260, 60], { jsCode: cfgJs }));
   add(createTable('Ensure Runs Table', [-1040, 60], RUNS_TABLE, RUN_COLUMNS));
   add(createTable('Ensure Recipients Table', [-820, 60], RECIPIENTS_TABLE, RECIPIENT_COLUMNS));
@@ -232,15 +290,10 @@ return [{ json: { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, fi
     resource: 'row', operation: 'get', dataTableId: tableRef(RUNS_TABLE),
     ...conds([['createdAt', 'gte', "={{ new Date(Date.now() - 8 * 86400000).toISOString() }}"]]), returnAll: true,
   }, { executeOnce: true, alwaysOutputData: true }));
-  add(jiraHttp('Get Scrum Boards', [-160, 60], "={{ $('Config').first().json.jiraBaseUrl }}/rest/agile/1.0/board",
-    [['maxResults', "={{ $('Config').first().json.pageSize }}"]],
-    ['startAt', '={{ $response.body.startAt + $response.body.maxResults }}'], '={{ $response.body.isLast !== false }}',
-    { executeOnce: true }));
+  add(node('Boards Request', 'n8n-nodes-base.code', 2, [-160, 60], { jsCode: boardsRequestJs }));
+  add(jiraCall('Get Scrum Boards', [-50, 220]));
   add(node('Select Boards', 'n8n-nodes-base.code', 2, [60, 60], { jsCode: selectBoardsJs }));
-  add(jiraHttp('Get Active Sprints', [280, 60], "={{ $('Config').first().json.jiraBaseUrl }}/rest/agile/1.0/board/{{ $json.boardId }}/sprint",
-    [['state', 'active'], ['maxResults', "={{ $('Config').first().json.pageSize }}"]],
-    ['startAt', '={{ $response.body.startAt + $response.body.maxResults }}'], '={{ $response.body.isLast !== false }}',
-    { onError: 'continueRegularOutput' }));
+  add(jiraCall('Get Active Sprints', [280, 60]));
   add(node('Collect Sprints', 'n8n-nodes-base.code', 2, [500, 60], { jsCode: collectSprintsJs }));
   add(node('Has Active Sprint?', 'n8n-nodes-base.if', 2.2, [720, 60], {
     conditions: {
@@ -252,12 +305,8 @@ return [{ json: { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, fi
     options: {},
   }));
   add(node('No Active Sprint', 'n8n-nodes-base.code', 2, [960, 300], { jsCode: noSprintJs }));
-  add(jiraHttp('Get Sprint Issues', [960, -60], "={{ $('Config').first().json.jiraBaseUrl }}/rest/api/3/search/jql",
-    [['jql', '=sprint = {{ $json.sprintId }} ORDER BY key'],
-      ['fields', "={{ ['" + ISSUE_FIELDS.join("','") + "', $('Config').first().json.flaggedField, $('Config').first().json.storyPointsField].filter(Boolean).join(',') }}"],
-      ['maxResults', "={{ $('Config').first().json.pageSize }}"]],
-    ['nextPageToken', '={{ $response.body.nextPageToken }}'],
-    '={{ !$response.body.nextPageToken || $response.body.isLast === true }}'));
+  add(node('Issues Request', 'n8n-nodes-base.code', 2, [960, -60], { jsCode: issuesRequestJs }));
+  add(jiraCall('Get Sprint Issues', [1070, -220]));
   add(node('Tag Pages With Sprint', 'n8n-nodes-base.code', 2, [1180, -60], { mode: 'runOnceForEachItem', jsCode: tagPagesJs }));
   add(node('Analyze Sprints', 'n8n-nodes-base.code', 2, [1400, -60], { jsCode: analyzeJs }));
   add(node('Should Send?', 'n8n-nodes-base.filter', 2.2, [1640, -240], {
@@ -331,12 +380,14 @@ return [{ json: { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, fi
   link('Ensure Runs Table', 'Ensure Recipients Table');
   link('Ensure Recipients Table', 'Get Recipients');
   link('Get Recipients', 'Get Recent History');
-  link('Get Recent History', 'Get Scrum Boards');
+  link('Get Recent History', 'Boards Request');
+  link('Boards Request', 'Get Scrum Boards');
   link('Get Scrum Boards', 'Select Boards');
   link('Select Boards', 'Get Active Sprints');
   link('Get Active Sprints', 'Collect Sprints');
   link('Collect Sprints', 'Has Active Sprint?');
-  link('Has Active Sprint?', 'Get Sprint Issues', 0);
+  link('Has Active Sprint?', 'Issues Request', 0);
+  link('Issues Request', 'Get Sprint Issues');
   link('Has Active Sprint?', 'No Active Sprint', 1);
   link('Get Sprint Issues', 'Tag Pages With Sprint');
   link('Tag Pages With Sprint', 'Analyze Sprints');
@@ -357,8 +408,8 @@ return [{ json: { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, fi
 
   const notes = [
     ['1. Triggers', 'Weekday 09:00 schedule (workflow timezone), manual run, or authenticated POST /webhook/sprint-health/run with optional {"dryRun":true} or {"force":true}.', [-1560, -300], 360, 760],
-    ['2. Config + state', 'All tunables in Config. State lives in two n8n Data Tables (created automatically): sprint_digest_recipients (who gets the digest) and sprint_health_runs (claims + daily snapshots).', [-1300, -160], 1120, 380],
-    ['3. Jira REST (paginated)', 'Agile API for boards and active sprints (startAt/isLast paging), REST v3 /search/jql for sprint issues (nextPageToken paging). 3 retries each, page cap from Config.maxPages.', [-200, -160], 1360, 380],
+    ['2. Config + state', 'All tunables in Config, validated on every run (bad values or a workflow/Config timezone mismatch stop the run and alert admins). State lives in two n8n Data Tables (created automatically): sprint_digest_recipients (who gets the digest) and sprint_health_runs (claims + daily snapshots).', [-1300, -160], 1120, 380],
+    ['3. Jira REST (paginated)', 'Every call goes through the "Jira GET" sub-workflow: startAt/isLast or nextPageToken paging, honours Retry-After on 429/503, exponential backoff with jitter on 5xx/network errors, no retry on other 4xx. Limits from Config.jira*.', [-200, -160], 1360, 380],
     ['4. Analyze', 'Buckets To Do / In Progress / Done / Blocked, flags stale (>3d In Progress), overdue, unassigned, blocked; completion %, workload, health, day-over-day delta; renders the email.', [1140, -160], 420, 380],
     ['5. Claim-before-send', 'Insert a pending claim, read back all claims for the same sprint+date, lowest live id wins. Loser marks itself lost. Winner emails one at a time (retries never re-send a delivered digest), then records sent/failed.', [1820, -560], 2280, 540],
   ];
@@ -368,13 +419,13 @@ return [{ json: { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, fi
   }));
 
   return {
-    id: IDS.main,
-    name: 'Jira Sprint Health Monitor & Daily Digest',
+    id: meta.id || IDS.main,
+    name: meta.name || 'Jira Sprint Health Monitor & Daily Digest',
     active: false,
     nodes: [...sticky, ...Object.values(n)],
     connections: c,
     settings: {
-      executionOrder: 'v1', timezone: config.timezone, errorWorkflow: IDS.error,
+      executionOrder: 'v1', timezone: cfg.timezone, errorWorkflow: IDS.error,
       saveDataErrorExecution: 'all', saveDataSuccessExecution: 'all', saveManualExecutions: true, saveExecutionProgress: true,
       callerPolicy: 'workflowsFromSameOwner',
     },
@@ -432,6 +483,94 @@ return [{ json: { to: [...new Set(admins)].join(', '), subject: '[Sprint Health]
   };
 }
 
+// ------------------------------------------------------------------ Jira GET sub-workflow
+// Called by the main workflow's "Get Scrum Boards", "Get Active Sprints" and
+// "Get Sprint Issues" nodes, once per request spec. The loop:
+//   Init -> Request State -> Jira Request -> Evaluate -> Done? -> Output
+//                 ^                                       | no
+//                 +---------------- Wait (waitMs) <-------+
+function jiraGetWorkflow() {
+  nid = 300;
+  const lib = src('jira-paging.js');
+  const initJs = `${lib}
+
+// ---- n8n wiring (one request spec per sub-workflow run)
+const items = $input.all();
+if (items.length !== 1) throw new Error('Jira GET expects exactly one request spec per call, got ' + items.length);
+const state = initState(items[0].json);
+return [{ json: { state, ...requestFor(state) } }];`;
+  const evaluateJs = `${lib}
+
+// ---- n8n wiring: $json is the HTTP response (full response, never-error) or { error } on a network failure
+const prev = $('Request State').last().json;
+const r = evaluate(prev.state, $json);
+const out = { action: r.action, waitMs: r.waitMs, state: r.state };
+if (r.action === 'continue') Object.assign(out, requestFor(r.state));
+return [{ json: out }];`;
+  const outputJs = `${lib}
+
+// ---- n8n wiring: one item per page, or throw (failOnError) / an { error } item
+return outputItems($json.state).map((json) => ({ json }));`;
+
+  const nodes = [
+    node('When Called By Monitor', 'n8n-nodes-base.executeWorkflowTrigger', 1.1, [0, 0], { inputSource: 'passthrough' }),
+    node('Init', 'n8n-nodes-base.code', 2, [220, 0], { jsCode: initJs }),
+    node('Request State', 'n8n-nodes-base.noOp', 1, [440, 0], {}),
+    node('Jira Request', 'n8n-nodes-base.httpRequest', 4.2, [660, 0], {
+      method: 'GET',
+      url: '={{ $json.url }}',
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'jiraSoftwareCloudApi',
+      sendQuery: true,
+      specifyQuery: 'json',
+      jsonQuery: '={{ JSON.stringify($json.query) }}',
+      options: { response: { response: { fullResponse: true, neverError: true } }, timeout: 30000 },
+    }, { credentials: CREDS.jira, onError: 'continueRegularOutput', alwaysOutputData: true }),
+    node('Evaluate', 'n8n-nodes-base.code', 2, [880, 0], { jsCode: evaluateJs }),
+    node('Done?', 'n8n-nodes-base.if', 2.2, [1100, 0], {
+      conditions: {
+        options: { caseSensitive: true, leftValue: '', typeValidation: 'strict', version: 2 },
+        conditions: [{ id: 'c-done', leftValue: '={{ $json.action }}', rightValue: 'done', operator: { type: 'string', operation: 'equals' } }],
+        combinator: 'and',
+      },
+      options: {},
+    }),
+    node('Output', 'n8n-nodes-base.code', 2, [1340, -100], { jsCode: outputJs }),
+    node('Wait (Retry-After / backoff / page gap)', 'n8n-nodes-base.wait', 1.1, [1340, 140], {
+      resume: 'timeInterval', amount: '={{ Math.max(0.05, $json.waitMs / 1000) }}', unit: 'seconds',
+    }, { webhookId: '3c0f7e52-1b9d-4c55-a1f0-7d2e9b6c4a18' }),
+  ];
+  const to = (n) => ({ node: n, type: 'main', index: 0 });
+  return {
+    id: IDS.jira,
+    name: JIRA_SUB_NAME,
+    active: false,
+    nodes: [{
+      id: 'sticky-jira', name: 'Note', type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [180, -300],
+      parameters: { width: 1320, height: 220, color: 5, content: '## Jira GET with pagination + rate-limit handling\n'
+        + 'Called by the monitor once per request. 2xx: keep the page and fetch the next (startAt/isLast or nextPageToken). '
+        + '429/503 or any Retry-After / X-RateLimit-Reset header: wait exactly that long. 408/425/5xx/network errors: exponential backoff with jitter '
+        + '(Config.jiraRetryBaseDelayMs x 2^attempt, capped at jiraRetryMaxDelayMs, up to jiraMaxRetries). Other 4xx: fail at once. Logic: src/jira-paging.js' },
+    }, ...nodes],
+    connections: {
+      'When Called By Monitor': { main: [[to('Init')]] },
+      Init: { main: [[to('Request State')]] },
+      'Request State': { main: [[to('Jira Request')]] },
+      'Jira Request': { main: [[to('Evaluate')]] },
+      Evaluate: { main: [[to('Done?')]] },
+      'Done?': { main: [[to('Output')], [to('Wait (Retry-After / backoff / page gap)')]] },
+      'Wait (Retry-After / backoff / page gap)': { main: [[to('Request State')]] },
+    },
+    settings: {
+      executionOrder: 'v1', timezone: config.timezone, callerPolicy: 'workflowsFromSameOwner',
+      // the parent run records everything; keep only failed sub-runs to avoid one saved execution per Jira call
+      saveDataSuccessExecution: 'none', saveDataErrorExecution: 'all', saveManualExecutions: true,
+    },
+    pinData: {},
+    tags: [],
+  };
+}
+
 // ------------------------------------------------------------------ test helpers (tests only, never shipped)
 function helpersWorkflow() {
   nid = 200;
@@ -451,6 +590,11 @@ function helpersWorkflow() {
     }),
     hook('POST test/runs', 'test/runs', [0, 300]),
     node('All Runs', 'n8n-nodes-base.dataTable', 1.1, [220, 300], { resource: 'row', operation: 'get', dataTableId: tableRef(RUNS_TABLE), returnAll: true }, { alwaysOutputData: true }),
+    hook('POST test/validate-config', 'test/validate-config', [0, 900]),
+    node('Validate Body Config', 'n8n-nodes-base.code', 2, [220, 900], { jsCode: `${src('validate.js')}
+const CONFIG = { ...${JSON.stringify(config)}, ...(($json.body || {}).config || {}) };
+const workflowTimezone = (typeof $now !== 'undefined' && $now && $now.zoneName) || '';
+return [{ json: { workflowTimezone, ...validateConfig(CONFIG, { workflowTimezone }) } }];` }),
     hook('POST test/runs-insert', 'test/runs-insert', [0, 600]),
     node('Rows To Insert', 'n8n-nodes-base.code', 2, [220, 600], { jsCode: "return ($json.body.rows || []).map((json) => ({ json }));" }),
     node('Insert Runs', 'n8n-nodes-base.dataTable', 1.1, [440, 600], {
@@ -465,8 +609,10 @@ function helpersWorkflow() {
       ...seq(['POST test/reset', 'Ensure Runs', 'Ensure Recipients', 'Clear Runs', 'Clear Recipients', 'Rows From Body', 'Insert Recipients']),
       ...seq(['POST test/runs', 'All Runs']),
       ...seq(['POST test/runs-insert', 'Rows To Insert', 'Insert Runs']),
+      ...seq(['POST test/validate-config', 'Validate Body Config']),
     },
-    settings: { executionOrder: 'v1' }, pinData: {}, tags: [],
+    // deliberately NOT the Config timezone: test/validate-config must report the mismatch
+    settings: { executionOrder: 'v1', timezone: 'America/New_York' }, pinData: {}, tags: [],
   };
 }
 
@@ -475,4 +621,10 @@ fs.mkdirSync(outDir, { recursive: true });
 const write = (f, obj) => { fs.writeFileSync(path.join(outDir, f), JSON.stringify(obj, null, 2) + '\n'); console.log('wrote', path.join(outDir, f)); };
 write('jira-sprint-health-monitor.json', mainWorkflow());
 write('error-handler.json', errorWorkflow());
-if (TEST) write('test-helpers.json', helpersWorkflow());
+write('jira-get.json', jiraGetWorkflow());
+if (TEST) {
+  write('test-helpers.json', helpersWorkflow());
+  // T27: the monitor exactly as shipped (placeholder Config) must stop in the Config node
+  write('test-shipped-config.json', mainWorkflow(DEFAULT_CONFIG, { id: IDS.shippedCfg, name: 'TEST ONLY - monitor with shipped Config',
+    webhookPath: 'test/run-shipped-config', webhookId: '0000000-test-shippedconfig' }));
+}

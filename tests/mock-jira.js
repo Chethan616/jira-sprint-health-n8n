@@ -53,8 +53,11 @@ const server = http.createServer((req, res) => {
     const fail = state.failures.find((f) => url.pathname.includes(f.match) && f.times > 0);
     if (fail) {
       fail.times -= 1;
+      state.log[state.log.length - 1].status = fail.status;
+      // retryAfter: seconds to send in Retry-After (null = omit); 429 defaults to 1 like Jira
+      const ra = fail.retryAfter !== undefined ? fail.retryAfter : (fail.status === 429 ? 1 : null);
       return send(res, fail.status, { errorMessages: [`mock injected ${fail.status}`] },
-        fail.status === 429 ? { 'Retry-After': '1' } : {});
+        ra === null ? {} : { 'Retry-After': String(ra) });
     }
 
     const d = state.data;
@@ -72,10 +75,16 @@ const server = http.createServer((req, res) => {
     if ((m = url.pathname.match(/^\/rest\/agile\/1\.0\/board\/(\d+)\/sprint$/))) {
       if (m[1] === '3' || m[1] === '5') return send(res, 400, { errorMessages: ['The board does not support sprints'] });
       let sprints = state.scenario === 'no_active' ? [] : (d.sprints[m[1]] || []);
+      // shared_sprint: board 2's filter also includes Payments Sprint 4 (origin board 1)
+      if (state.scenario === 'shared_sprint' && m[1] === '2') sprints = [d.sprints[1][0], ...d.sprints[2]];
       if (m[1] === '4') sprints = [{ ...d.sprints[2][0], id: 41, name: 'Web Sprint 2', boardId: 4, originBoardId: 4 }];
       if (q.state) sprints = sprints.filter((s) => q.state.split(',').includes(s.state));
       return send(res, 200, page(sprints, Number(q.startAt || 0), Number(q.maxResults || 50), BOARD_PAGE_CAP));
     }
+    // used by scripts/live-check.js
+    if (url.pathname === '/rest/api/3/myself') return send(res, 200, { accountId: 'acc-mock', displayName: 'Mock User', timeZone: 'Asia/Kolkata' });
+    if (url.pathname === '/rest/api/3/field') return send(res, 200, [
+      { id: 'summary', name: 'Summary' }, { id: 'customfield_10016', name: 'Story point estimate' }, { id: 'customfield_10021', name: 'Flagged' }]);
     if (url.pathname === '/rest/api/3/search/jql') {
       const sm = String(q.jql || '').match(/sprint\s*=\s*(\d+)/i);
       if (!sm) return send(res, 400, { errorMessages: ['mock: jql must be "sprint = <id>"'] });

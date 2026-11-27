@@ -9,6 +9,7 @@
     "e2e:setup": "bash tests/setup-test-env.sh",
     "e2e": "node tests/run-e2e.js && node scripts/write-test-report.js",
     "seed": "node scripts/seed-jira.js",
+    "live-check": "node scripts/live-check.js",
     "deck": "node deck/build-deck.js"
   },
   "devDependencies": {

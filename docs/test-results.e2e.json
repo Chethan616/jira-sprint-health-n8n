@@ -1,8 +1,8 @@
 {
-  "ranAt": "2026-11-16T06:23:40.409Z",
-  "environment": "n8n 2.45.7 (n8n start, isolated user folder) + mock Jira Cloud + SMTP sink",
-  "passed": 21,
-  "total": 21,
+  "ranAt": "2026-11-27T08:14:56.961Z",
+  "environment": "n8n 2.48.8 (n8n start, isolated user folder) + mock Jira Cloud + SMTP sink",
+  "passed": 27,
+  "total": 27,
   "results": [
     {
       "id": "T01",
@@ -10,21 +10,30 @@
       "expected": "Both sprints sent; Payments=Critical 29% (3 blocked, 2 stale, 2 overdue, 2 unassigned, Priya overloaded); Mobile=Healthy; 10 Jira calls incl. 3 board pages and 4 search pages",
       "actual": "HTTP 200; sent=2; Payments Critical 29% blocked=3 stale=2 overdue=2 unassigned=2 overloaded=Priya Raman; Jira calls=10 (sprint-11 pages=4); emails=2; rows=sent,sent",
       "pass": true,
-      "ms": 16115,
+      "ms": 14662,
       "detail": {
         "summary": {
-          "runId": "run-20261116061937-bcdy",
+          "runId": "run-20261127081012-a8rb",
           "trigger": "webhook",
           "dryRun": false,
-          "finishedAt": "2026-11-16T06:19:52.580Z",
+          "finishedAt": "2026-11-27T08:10:26.787Z",
+          "timezone": "Asia/Kolkata",
+          "workflowTimezone": "Asia/Kolkata",
+          "configWarnings": [],
           "sent": 2,
           "failed": 0,
           "sprints": [
             {
               "sprint": "Payments Sprint 4",
-              "digest_key": "11:2026-11-16",
+              "digest_key": "11:2026-11-27",
               "health": "Critical",
               "completionPct": 29,
+              "pointsPct": 24,
+              "progressPct": 24,
+              "progressBy": "story points",
+              "boards": [
+                1
+              ],
               "blocked": 3,
               "stale": 2,
               "overdue": 2,
@@ -33,20 +42,33 @@
                 "Priya Raman"
               ],
               "recipients": 1,
-              "outcome": "sent"
+              "outcome": "sent",
+              "to": [
+                "team@test.local"
+              ]
             },
             {
               "sprint": "Mobile Sprint 9",
-              "digest_key": "21:2026-11-16",
+              "digest_key": "21:2026-11-27",
               "health": "Healthy",
               "completionPct": 33,
+              "pointsPct": 30,
+              "progressPct": 30,
+              "progressBy": "story points",
+              "boards": [
+                2
+              ],
               "blocked": 0,
               "stale": 0,
               "overdue": 0,
               "unassigned": 0,
               "overloaded": [],
               "recipients": 2,
-              "outcome": "sent"
+              "outcome": "sent",
+              "to": [
+                "team@test.local",
+                "mobile@test.local"
+              ]
             }
           ]
         },
@@ -55,14 +77,14 @@
             "to": [
               "<team@test.local>"
             ],
-            "subject": "[Sprint Health] Payments Sprint 4 | Critical | 29% done | 2026-11-16"
+            "subject": "[Sprint Health] Payments Sprint 4 | Critical | 29% done | 2026-11-27"
           },
           {
             "to": [
               "<team@test.local>",
               "<mobile@test.local>"
             ],
-            "subject": "[Sprint Health] Mobile Sprint 9 | Healthy | 33% done | 2026-11-16"
+            "subject": "[Sprint Health] Mobile Sprint 9 | Healthy | 33% done | 2026-11-27"
           }
         ]
       }
@@ -73,7 +95,7 @@
       "expected": "Second run sends nothing (skip_already_sent); still 2 emails total",
       "actual": "outcomes={\"Payments Sprint 4\":\"skip_already_sent\",\"Mobile Sprint 9\":\"skip_already_sent\"}; emails total=2",
       "pass": true,
-      "ms": 2439,
+      "ms": 1815,
       "detail": {}
     },
     {
@@ -82,27 +104,27 @@
       "expected": "Both sprints re-sent; 4 emails total",
       "actual": "outcomes={\"Payments Sprint 4\":\"sent\",\"Mobile Sprint 9\":\"sent\"}; emails total=4",
       "pass": true,
-      "ms": 15733,
+      "ms": 14164,
       "detail": {}
     },
     {
       "id": "T04",
       "name": "Dry run returns a preview without sending or writing state",
       "expected": "outcome=preview with subject/text; 0 emails; 0 rows",
-      "actual": "outcomes=preview,preview; emails=0; rows=0; subject=\"[Sprint Health] Payments Sprint 4 | Critical | 29% done | 2026-11-16\"",
+      "actual": "outcomes=preview,preview; emails=0; rows=0; subject=\"[Sprint Health] Payments Sprint 4 | Critical | 29% done | 2026-11-27\"",
       "pass": true,
-      "ms": 2679,
+      "ms": 1872,
       "detail": {
-        "previewText": "Payments Sprint 4: Critical (3 issues blocked)\nDate: 2026-11-16 (Asia/Kolkata)\nCompletion: 29% (5/17); sprint elapsed 43%; first digest for this sprint\nTo Do 5 | In Progress 4 | Done 5 | Blocked 3\nBlocked (3):\n  - SCRUM-6 Fraud rules engine integration [Arjun Mehta] status\n  - SCRUM-10 Currency rounding bug in checkout [Arjun Mehta] flagged\n  - SCRUM-11 Load test checkout flow [Priya Raman] blocked by SCRUM-4\nIn Progress > 3 days (2):\n  - SCRUM-4 Migrate session store to Redis [Priya Raman] 5d\n  - SCRUM-15 Settlement report export [Rahul Verma] 3.5d\nOverdue (2):\n  - SCRUM-8 Invoice PDF generation [Neha Kapoor] due 2026-11-14\n  - SCRUM-9 Audit log retention policy [Priya Raman] due 2026-11-15\nUnassigned (2):\n  - SCRUM-7 Update API docs for v2 endpoints [Unassigned] To Do\n  - SCRUM-12 Dashboard: failed payments widget [Unassigned] To Do\n\nWorkload: Priya Raman 6 (overloaded), Arjun Mehta 2, Neha Kapoor 1, Rahul Verma 1\n"
+        "previewText": "Payments Sprint 4: Critical (3 issues blocked)\nDate: 2026-11-27 (Asia/Kolkata)\nCompletion: 29% (5/17); sprint elapsed 43%; first digest for this sprint\nStory points: 13/55 done (24%), 17 of 17 issues estimated.\nHealth basis: the lower of issue-count and story-point progress (story points: 24%)\nTo Do 5 | In Progress 4 | Done 5 | Blocked 3\nBlocked (3):\n  - SCRUM-6 Fraud rules engine integration [Arjun Mehta] status\n  - SCRUM-10 Currency rounding bug in checkout [Arjun Mehta] flagged\n  - SCRUM-11 Load test checkout flow [Priya Raman] blocked by SCRUM-4\nIn Progress > 3 days (2):\n  - SCRUM-4 Migrate session store to Redis [Priya Raman] 5d\n  - SCRUM-15 Settlement report export [Rahul Verma] 3.5d\nOverdue (2):\n  - SCRUM-8 Invoice PDF generation [Neha Kapoor] due 2026-11-25\n  - SCRUM-9 Audit log retention policy [Priya Raman] due 2026-11-26\nUnassigned (2):\n  - SCRUM-7 Update API docs for v2 endpoints [Unassigned] To Do\n  - SCRUM-12 Dashboard: failed payments widget [Unassigned] To Do\n\nWorkload: Priya Raman 6 (overloaded), Arjun Mehta 2, Neha Kapoor 1, Rahul Verma 1\n"
       }
     },
     {
       "id": "T05",
       "name": "Concurrency: 5 overlapping executions at once",
       "expected": "Exactly 1 email per sprint (2 total); 1 sent row per sprint, every other claim marked lost or skipped",
-      "actual": "emails=2; rows per key={\"11:2026-11-16\":[\"1:sent\",\"3:lost\",\"5:lost\",\"7:lost\",\"9:lost\"],\"21:2026-11-16\":[\"2:sent\",\"4:lost\",\"6:lost\",\"8:lost\",\"10:lost\"]}; run outcomes=[\"sent/sent\",\"lost_race/lost_race\",\"lost_race/lost_race\",\"lost_race/lost_race\",\"lost_race/lost_race\"]",
+      "actual": "emails=2; rows per key={\"11:2026-11-27\":[\"1:sent\",\"3:lost\",\"5:lost\",\"7:lost\",\"9:lost\"],\"21:2026-11-27\":[\"2:sent\",\"4:lost\",\"6:lost\",\"8:lost\",\"10:lost\"]}; run outcomes=[\"sent/sent\",\"lost_race/lost_race\",\"lost_race/lost_race\",\"lost_race/lost_race\",\"lost_race/lost_race\"]",
       "pass": true,
-      "ms": 23297,
+      "ms": 17173,
       "detail": {}
     },
     {
@@ -111,7 +133,7 @@
       "expected": "Node retries (3 tries) and the run still succeeds; 2 emails",
       "actual": "HTTP 200; sent=2; emails=2; Jira calls=12 (incl. 2 failed)",
       "pass": true,
-      "ms": 19151,
+      "ms": 16139,
       "detail": {}
     },
     {
@@ -120,16 +142,16 @@
       "expected": "Retried after back-off; run succeeds",
       "actual": "HTTP 200; sent=2",
       "pass": true,
-      "ms": 19106,
+      "ms": 15272,
       "detail": {}
     },
     {
       "id": "T08",
       "name": "Jira down (HTTP 500 on every call)",
-      "expected": "Run fails after retries; no digest; Error Workflow emails the admin",
-      "actual": "HTTP 500; digests=0; admin alert=\"[Sprint Health] Workflow failure: The service was not able to process your request\"",
+      "expected": "Run fails after 4 retries with backoff; no digest; Error Workflow emails the admin with Jira error text",
+      "actual": "HTTP 500; digests=0; admin alert=\"[Sprint Health] Workflow failure: Get Scrum Boards failed: Jira GET /rest/agile/1.0/board failed after 5 attempts: HTTP 500: mock injected 500 [line 9]\"",
       "pass": true,
-      "ms": 8019,
+      "ms": 13330,
       "detail": {}
     },
     {
@@ -138,7 +160,7 @@
       "expected": "Payments=failed, Mobile=sent; failed row recorded; run errors; admin alerted",
       "actual": "HTTP 500; rows={\"Payments Sprint 4\":\"failed\",\"Mobile Sprint 9\":\"sent\"}; error=\"Data command failed: 554 5.7.1 mock: message rejected\"; admin alert=yes",
       "pass": true,
-      "ms": 26650,
+      "ms": 24763,
       "detail": {}
     },
     {
@@ -147,7 +169,7 @@
       "expected": "Payments sent now; Mobile skip_already_sent",
       "actual": "outcomes={\"Payments Sprint 4\":\"sent\",\"Mobile Sprint 9\":\"skip_already_sent\"}; new emails=1",
       "pass": true,
-      "ms": 9353,
+      "ms": 8021,
       "detail": {}
     },
     {
@@ -156,7 +178,7 @@
       "expected": "Payments retried and delivered once; Mobile delivered exactly once (no duplicate)",
       "actual": "HTTP 200; events=rejected, accepted:Payments, accepted:Mobile",
       "pass": true,
-      "ms": 20911,
+      "ms": 19226,
       "detail": {}
     },
     {
@@ -165,7 +187,7 @@
       "expected": "Sprint on the team-managed Scrum board is sent; the Kanban board's HTTP 400 \"does not support sprints\" is skipped, not an error",
       "actual": "HTTP 200; outcomes={\"Web Sprint 2\":\"sent\"}; kanban board queried (400)=true",
       "pass": true,
-      "ms": 8732,
+      "ms": 7045,
       "detail": {}
     },
     {
@@ -174,16 +196,16 @@
       "expected": "Run fails with a clear \"No sprint-capable boards\" error; admin alerted; no digest",
       "actual": "HTTP 500; admin alert=\"[Sprint Health] Workflow failure: No sprint-capable boards found (types scrum/simple). Check the Jira user can browse the project, or fix Config.boardIds \"",
       "pass": true,
-      "ms": 1462,
+      "ms": 799,
       "detail": {}
     },
     {
       "id": "T21",
       "name": "Sprint lookup returns HTTP 500 on every attempt (boards OK)",
       "expected": "Not mistaken for a Kanban 400: run fails, admin alerted, no digest",
-      "actual": "HTTP 500; digests=0; admin alert=\"=?UTF-8?Q?=5BSprint_Health=5D_Workflow_failure=3A_?= =?UTF-8?Q?Get_Active_Sprints_failed=3A_=7B=22statu?= =?UTF-8?Q?sCode=22=3A500=2C=22error=22=3A=22=7B=5C?= =?UTF-8?Q?=22errorMessages=5C=22=3A=5B=5C=22mock_i?= =?UTF-8?Q?njected_500=5C=22=5D=7D=22=2C=22isAxiosE?= =?UTF-8?Q?rror=22=3Atrue=2C=22?=\"",
+      "actual": "HTTP 500; digests=0; admin alert=\"[Sprint Health] Workflow failure: Get Active Sprints failed: Jira GET /rest/agile/1.0/board/1/sprint failed after 5 attempts: HTTP 500: mock injected 500 \"",
       "pass": true,
-      "ms": 8692,
+      "ms": 25802,
       "detail": {}
     },
     {
@@ -192,7 +214,7 @@
       "expected": "status=no_active_sprint; no emails; no rows",
       "actual": "HTTP 200; status=no_active_sprint; emails=0; rows=0",
       "pass": true,
-      "ms": 1673,
+      "ms": 937,
       "detail": {}
     },
     {
@@ -201,7 +223,7 @@
       "expected": "Digest still sent with health=Empty, 0%",
       "actual": "Payments Sprint 4: Empty 0% sent; Mobile Sprint 9: Empty 0% sent",
       "pass": true,
-      "ms": 15441,
+      "ms": 13479,
       "detail": {}
     },
     {
@@ -210,7 +232,7 @@
       "expected": "Stale claim ignored; digest sent",
       "actual": "outcomes={\"Payments Sprint 4\":\"sent\",\"Mobile Sprint 9\":\"sent\"}",
       "pass": true,
-      "ms": 15928,
+      "ms": 14243,
       "detail": {}
     },
     {
@@ -219,16 +241,16 @@
       "expected": "Payments skip_in_flight; no duplicate email for it",
       "actual": "outcomes={\"Payments Sprint 4\":\"skip_in_flight\",\"Mobile Sprint 9\":\"sent\"}; Payments emails=0",
       "pass": true,
-      "ms": 9553,
+      "ms": 8048,
       "detail": {}
     },
     {
       "id": "T15",
       "name": "Day-over-day trend from yesterday's snapshot",
       "expected": "Email shows \"+9 pts vs <yesterday>\" (29% today vs 20% yesterday)",
-      "actual": "found \"+9 pts vs 2026-11-15\" in email",
+      "actual": "found \"+9 pts vs 2026-11-26\" in email",
       "pass": true,
-      "ms": 15984,
+      "ms": 14361,
       "detail": {}
     },
     {
@@ -237,7 +259,7 @@
       "expected": "skip_no_recipients; no emails, no claims",
       "actual": "outcomes={\"Payments Sprint 4\":\"skip_no_recipients\",\"Mobile Sprint 9\":\"skip_no_recipients\"}; emails=0; rows=0",
       "pass": true,
-      "ms": 2774,
+      "ms": 1834,
       "detail": {}
     },
     {
@@ -246,7 +268,78 @@
       "expected": "Rejected (HTTP 403), workflow not executed",
       "actual": "HTTP 403; Jira calls=0",
       "pass": true,
-      "ms": 67,
+      "ms": 76,
+      "detail": {}
+    },
+    {
+      "id": "T22",
+      "name": "Sprint shown on two boards (origin board 1 + board 2): recipients of both boards, one email",
+      "expected": "Payments sent once to team@ AND mobile@ (board 2 subscriber); Mobile sent once; 2 emails, 2 sent rows",
+      "actual": "HTTP 200; emails=2; Payments to=[<team@test.local>,<mobile@test.local>] boards=[1,2]; sent rows=2",
+      "pass": true,
+      "ms": 14463,
+      "detail": {}
+    },
+    {
+      "id": "T23",
+      "name": "HTTP 429 with Retry-After: 2 on issue search",
+      "expected": "Retried once after waiting >= 2 s (the Retry-After value, not a fixed delay); run succeeds",
+      "actual": "HTTP 200; sent=2; first-page calls=429,200; wait before retry=2033 ms",
+      "pass": true,
+      "ms": 16271,
+      "detail": {}
+    },
+    {
+      "id": "T24",
+      "name": "HTTP 503 twice without Retry-After: exponential backoff",
+      "expected": "Retries after ~0.5-1 s, then ~1-2 s (second wait >= first); run succeeds",
+      "actual": "HTTP 200; first-page calls=503,503,200; waits=784 ms, 1675 ms",
+      "pass": true,
+      "ms": 16710,
+      "detail": {}
+    },
+    {
+      "id": "T25",
+      "name": "HTTP 403 on issue search is not retried",
+      "expected": "Exactly 1 search call per sprint (no pointless retries); run fails with the 403 in the alert; no digest",
+      "actual": "HTTP 500; search calls per sprint={\"11\":1,\"21\":1}; digests=0; admin alert=[Sprint Health] Workflow failure: Get Sprint Issues failed for sprint 11 (Payments Sprint 4): Jira GET /rest/a",
+      "pass": true,
+      "ms": 1611,
+      "detail": {}
+    },
+    {
+      "id": "T26",
+      "name": "Config validation and timezone check inside n8n",
+      "expected": "Monitor reports workflow tz = Config tz (Asia/Kolkata); a workflow on America/New_York flags the mismatch; bad values are listed; matching tz passes",
+      "actual": "monitor tz=Asia/Kolkata/Asia/Kolkata; NY workflow: 1 error (\"workflow timezone is America/New_York but Config.timezone is Asia/Kolk...\"); matching tz: 0 errors; bad values: 3 errors",
+      "pass": true,
+      "ms": 1844,
+      "detail": {
+        "mismatch": {
+          "workflowTimezone": "America/New_York",
+          "errors": [
+            "workflow timezone is America/New_York but Config.timezone is Asia/Kolkata; set Workflow Settings -> Timezone to Asia/Kolkata (or change Config.timezone) so the schedule and the digest date use the same calendar"
+          ],
+          "warnings": []
+        },
+        "bad": {
+          "workflowTimezone": "America/New_York",
+          "errors": [
+            "jiraBaseUrl is not a valid URL (not a url); expected e.g. https://your-site.atlassian.net",
+            "overloadThreshold must be between 1 and 1000 (got 0)",
+            "pageSize must be between 1 and 100 (got 1000)"
+          ],
+          "warnings": []
+        }
+      }
+    },
+    {
+      "id": "T27",
+      "name": "Invalid Config stops the real run before any Jira call",
+      "expected": "Shipped placeholder config (your-team.atlassian.net) fails in the Config node; 0 Jira calls; admin alerted with the problem list",
+      "actual": "HTTP 500; Jira calls=0; admin alert=\"[Sprint Health] Workflow failure: Invalid Config (2 problems; edit the Config node or Work\"",
+      "pass": true,
+      "ms": 648,
       "detail": {}
     }
   ]

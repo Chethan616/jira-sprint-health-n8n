@@ -29,7 +29,7 @@
         -160
       ],
       "parameters": {
-        "content": "## 2. Config + state\nAll tunables in Config. State lives in two n8n Data Tables (created automatically): sprint_digest_recipients (who gets the digest) and sprint_health_runs (claims + daily snapshots).",
+        "content": "## 2. Config + state\nAll tunables in Config, validated on every run (bad values or a workflow/Config timezone mismatch stop the run and alert admins). State lives in two n8n Data Tables (created automatically): sprint_digest_recipients (who gets the digest) and sprint_health_runs (claims + daily snapshots).",
         "width": 1120,
         "height": 380,
         "color": 7
@@ -45,7 +45,7 @@
         -160
       ],
       "parameters": {
-        "content": "## 3. Jira REST (paginated)\nAgile API for boards and active sprints (startAt/isLast paging), REST v3 /search/jql for sprint issues (nextPageToken paging). 3 retries each, page cap from Config.maxPages.",
+        "content": "## 3. Jira REST (paginated)\nEvery call goes through the \"Jira GET\" sub-workflow: startAt/isLast or nextPageToken paging, honours Retry-After on 429/503, exponential backoff with jitter on 5xx/network errors, no retry on other 4xx. Limits from Config.jira*.",
         "width": 1360,
         "height": 380,
         "color": 4
@@ -149,7 +149,7 @@
         60
       ],
       "parameters": {
-        "jsCode": "// All tunables in one place. Secrets live in n8n credentials; recipient\n// addresses live in the \"sprint_digest_recipients\" Data Table.\nconst CONFIG = {\n  \"jiraBaseUrl\": \"https://your-team.atlassian.net\",\n  \"boardIds\": [],\n  \"boardTypes\": [\n    \"scrum\",\n    \"simple\"\n  ],\n  \"timezone\": \"Asia/Kolkata\",\n  \"staleInProgressDays\": 3,\n  \"overloadThreshold\": 5,\n  \"blockedStatusNames\": [\n    \"Blocked\"\n  ],\n  \"flaggedField\": \"customfield_10021\",\n  \"storyPointsField\": \"customfield_10016\",\n  \"criticalBlockedCount\": 3,\n  \"criticalBehindPct\": 30,\n  \"atRiskBehindPct\": 15,\n  \"pageSize\": 100,\n  \"maxPages\": 50,\n  \"fromEmail\": \"n8n Sprint Digest <sprint-digest@your-domain.com>\",\n  \"staleClaimMinutes\": 30,\n  \"maxListItems\": 10\n};\n\nconst input = $input.first().json || {};\nconst body = input.body || {};\nconst trigger = input.body !== undefined ? 'webhook' : (input.timestamp || input['Readable date'] ? 'schedule' : 'manual');\nconst runId = 'run-' + new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + Math.random().toString(36).slice(2, 6);\nreturn [{ json: { ...CONFIG, runId, trigger, nowIso: new Date().toISOString(), dryRun: body.dryRun === true, force: body.force === true } }];"
+        "jsCode": "// All tunables in one place. Secrets live in n8n credentials; recipient\n// addresses live in the \"sprint_digest_recipients\" Data Table.\nconst CONFIG = {\n  \"jiraBaseUrl\": \"https://your-team.atlassian.net\",\n  \"boardIds\": [],\n  \"boardTypes\": [\n    \"scrum\",\n    \"simple\"\n  ],\n  \"timezone\": \"Asia/Kolkata\",\n  \"staleInProgressDays\": 3,\n  \"overloadThreshold\": 5,\n  \"blockedStatusNames\": [\n    \"Blocked\"\n  ],\n  \"flaggedField\": \"customfield_10021\",\n  \"storyPointsField\": \"customfield_10016\",\n  \"criticalBlockedCount\": 3,\n  \"criticalBehindPct\": 30,\n  \"atRiskBehindPct\": 15,\n  \"progressBasis\": \"both\",\n  \"minPointsCoveragePct\": 50,\n  \"sprintBoardRouting\": \"all\",\n  \"pageSize\": 100,\n  \"maxPages\": 50,\n  \"jiraMaxRetries\": 4,\n  \"jiraRetryBaseDelayMs\": 1000,\n  \"jiraRetryMaxDelayMs\": 30000,\n  \"jiraPageIntervalMs\": 200,\n  \"fromEmail\": \"n8n Sprint Digest <sprint-digest@your-domain.com>\",\n  \"staleClaimMinutes\": 30,\n  \"maxListItems\": 10\n};\n\n// ---- validation (src/validate.js): a bad value stops the run here, before any\n// Jira call or email, and the Error Workflow emails the admins the list.\n// Validate Config: run by the Config node before anything touches Jira or email,\n// and by scripts/build-workflows.js at build time. Pure function, no n8n globals.\n//\n// Errors stop the run (the Error Workflow then emails the admins with the list),\n// warnings are reported in the run summary.\n\nconst PLACEHOLDER_HOSTS = ['your-team.atlassian.net', 'your-domain.com', 'example.atlassian.net'];\nconst BOARD_TYPES = ['scrum', 'simple', 'kanban'];\nconst FIELD_ID = /^[A-Za-z_][A-Za-z0-9_]*$/; // customfield_10016, duedate, ...\nconst EMAIL = /^[^\\s@<>]+@[^\\s@<>]+\\.[^\\s@<>]+$/;\n\n// IANA name -> canonical name, or null if the runtime does not know the zone.\nfunction canonicalTimeZone(tz) {\n  if (typeof tz !== 'string' || !tz.trim()) return null;\n  // Region/City names (or UTC) only: abbreviations such as IST or EST are ambiguous\n  // (IST = India, Israel or Ireland) even where the runtime happens to accept them.\n  if (!/^(UTC|GMT|Etc\\/[A-Za-z0-9+-]+|[A-Za-z]+(\\/[A-Za-z0-9_+-]+)+)$/.test(tz.trim())) return null;\n  try {\n    return new Intl.DateTimeFormat('en-US', { timeZone: tz.trim() }).resolvedOptions().timeZone;\n  } catch (e) {\n    return null;\n  }\n}\n\n// Minimal URL parser: the n8n Code-node sandbox has no global URL class.\nfunction parseUrl(s) {\n  const m = /^([a-z][a-z0-9+.-]*:)\\/\\/(\\[[0-9a-f:]+\\]|[^/?#:\\s[\\]]+)(?::(\\d{1,5}))?(\\/[^?#\\s]*)?(\\?[^#\\s]*)?(#\\S*)?$/i.exec(String(s));\n  if (!m) return null;\n  return { protocol: m[1].toLowerCase(), hostname: m[2].toLowerCase().replace(/^\\[|\\]$/g, ''), port: m[3] || '', pathname: m[4] || '', search: m[5] || '' };\n}\n\n// \"Name <addr@x.y>\" or \"addr@x.y\" -> addr@x.y, or null\nfunction emailAddress(s) {\n  if (typeof s !== 'string') return null;\n  const m = s.match(/<([^<>]+)>\\s*$/);\n  const addr = (m ? m[1] : s).trim();\n  return EMAIL.test(addr) ? addr : null;\n}\n\nfunction validateConfig(cfg, opts = {}) {\n  const errors = [];\n  const warnings = [];\n  const c = cfg || {};\n\n  const int = (key, min, max) => {\n    const v = c[key];\n    if (v === undefined || v === null || v === '') return errors.push(`${key} is required`);\n    if (typeof v !== 'number' || !Number.isInteger(v)) return errors.push(`${key} must be a whole number (got ${JSON.stringify(v)})`);\n    if (v < min || (max != null && v > max)) errors.push(`${key} must be between ${min} and ${max == null ? 'any' : max} (got ${v})`);\n  };\n\n  // --- Jira site\n  if (typeof c.jiraBaseUrl !== 'string' || !c.jiraBaseUrl.trim()) {\n    errors.push('jiraBaseUrl is required (e.g. https://your-site.atlassian.net)');\n  } else {\n    const u = parseUrl(c.jiraBaseUrl.trim());\n    if (!u) errors.push(`jiraBaseUrl is not a valid URL (${c.jiraBaseUrl}); expected e.g. https://your-site.atlassian.net`);\n    if (u) {\n      const local = ['localhost', '127.0.0.1', '::1'].includes(u.hostname);\n      if (!['https:', 'http:'].includes(u.protocol)) errors.push('jiraBaseUrl must start with https://');\n      else if (u.protocol === 'http:' && !local) warnings.push('jiraBaseUrl uses http://; Jira Cloud requires https://');\n      if (PLACEHOLDER_HOSTS.includes(u.hostname)) errors.push(`jiraBaseUrl is still the placeholder (${u.hostname}); set it to your Jira site`);\n      if (u.pathname.replace(/\\/+$/, '') !== '' || u.search) errors.push('jiraBaseUrl must be the site root only, without a path or query (e.g. https://your-site.atlassian.net)');\n    }\n  }\n\n  // --- boards\n  if (!Array.isArray(c.boardIds)) errors.push('boardIds must be a list of board ids ([] = all boards)');\n  else {\n    const bad = c.boardIds.filter((b) => !(Number.isInteger(Number(b)) && Number(b) > 0));\n    if (bad.length) errors.push(`boardIds contains invalid ids: ${bad.map((b) => JSON.stringify(b)).join(', ')}`);\n  }\n  if (!Array.isArray(c.boardTypes) || !c.boardTypes.length) errors.push('boardTypes must be a non-empty list (e.g. [\"scrum\",\"simple\"])');\n  else {\n    const bad = c.boardTypes.filter((t) => !BOARD_TYPES.includes(String(t)));\n    if (bad.length) errors.push(`boardTypes has unknown types: ${bad.join(', ')} (allowed: ${BOARD_TYPES.join(', ')})`);\n  }\n\n  // --- timezone (calendar for \"today\", overdue and the digest date)\n  const tz = canonicalTimeZone(c.timezone);\n  if (!tz) errors.push(`timezone is not a valid IANA time zone (got ${JSON.stringify(c.timezone)}; e.g. \"Asia/Kolkata\", not \"IST\")`);\n\n  // The Schedule trigger fires in the WORKFLOW timezone (Settings -> Timezone, or the\n  // instance's GENERIC_TIMEZONE), while the digest logic uses Config.timezone. If they\n  // differ, \"09:00\" and \"today\" refer to different calendars.\n  if (opts.workflowTimezone !== undefined) {\n    const wtz = canonicalTimeZone(opts.workflowTimezone);\n    if (!opts.workflowTimezone) warnings.push('could not read the workflow timezone; check Settings -> Timezone matches Config.timezone');\n    else if (!wtz) errors.push(`workflow timezone ${JSON.stringify(opts.workflowTimezone)} is not a valid IANA time zone`);\n    else if (tz && wtz !== tz) {\n      errors.push(`workflow timezone is ${opts.workflowTimezone} but Config.timezone is ${c.timezone}; set Workflow Settings -> Timezone to ${c.timezone} (or change Config.timezone) so the schedule and the digest date use the same calendar`);\n    }\n  }\n\n  // --- business rules\n  int('staleInProgressDays', 0, 365);\n  int('overloadThreshold', 1, 1000);\n  int('criticalBlockedCount', 1, 1000);\n  int('criticalBehindPct', 1, 100);\n  int('atRiskBehindPct', 1, 100);\n  if (Number.isInteger(c.atRiskBehindPct) && Number.isInteger(c.criticalBehindPct) && c.atRiskBehindPct > c.criticalBehindPct) {\n    errors.push(`atRiskBehindPct (${c.atRiskBehindPct}) must not be greater than criticalBehindPct (${c.criticalBehindPct})`);\n  }\n  if (!['issues', 'points', 'both'].includes(c.progressBasis)) errors.push(`progressBasis must be \"issues\", \"points\" or \"both\" (got ${JSON.stringify(c.progressBasis)})`);\n  int('minPointsCoveragePct', 0, 100);\n  if (['points', 'both'].includes(c.progressBasis) && !c.storyPointsField) warnings.push(`progressBasis is \"${c.progressBasis}\" but storyPointsField is empty; issue count is used`);\n  if (!['all', 'origin'].includes(c.sprintBoardRouting)) errors.push(`sprintBoardRouting must be \"all\" or \"origin\" (got ${JSON.stringify(c.sprintBoardRouting)})`);\n  if (!Array.isArray(c.blockedStatusNames) || c.blockedStatusNames.some((s) => typeof s !== 'string' || !s.trim())) {\n    errors.push('blockedStatusNames must be a list of status names (e.g. [\"Blocked\"])');\n  } else if (!c.blockedStatusNames.length) warnings.push('blockedStatusNames is empty; only the Flagged field and \"is blocked by\" links mark issues as Blocked');\n  for (const key of ['flaggedField', 'storyPointsField']) {\n    const v = c[key];\n    if (v === undefined || v === null || v === '') { if (key === 'flaggedField') warnings.push('flaggedField is empty; flagged issues will not count as Blocked'); continue; }\n    if (typeof v !== 'string' || !FIELD_ID.test(v)) errors.push(`${key} must be a Jira field id like customfield_10016 (got ${JSON.stringify(v)})`);\n  }\n\n  // --- Jira API\n  int('pageSize', 1, 100); // Jira caps maxResults at 100 for these endpoints\n  int('maxPages', 1, 1000);\n  int('jiraMaxRetries', 0, 10);\n  int('jiraRetryBaseDelayMs', 100, 60000);\n  int('jiraRetryMaxDelayMs', 1000, 60000); // >65 s would turn the Wait node into a persisted wait\n  int('jiraPageIntervalMs', 0, 10000);\n  if (Number.isInteger(c.jiraRetryBaseDelayMs) && Number.isInteger(c.jiraRetryMaxDelayMs) && c.jiraRetryBaseDelayMs > c.jiraRetryMaxDelayMs) {\n    errors.push('jiraRetryBaseDelayMs must not be greater than jiraRetryMaxDelayMs');\n  }\n\n  // --- delivery\n  const from = emailAddress(c.fromEmail);\n  if (!from) errors.push(`fromEmail must be an address like \"Sprint Digest <digest@your-company.com>\" (got ${JSON.stringify(c.fromEmail)})`);\n  else if (PLACEHOLDER_HOSTS.includes(from.split('@')[1].toLowerCase())) errors.push(`fromEmail is still the placeholder (${from}); set your sender address`);\n  int('staleClaimMinutes', 1, 1440);\n  int('maxListItems', 1, 200);\n\n  return { errors, warnings };\n}\n\nif (typeof module !== 'undefined' && module.exports) module.exports = { validateConfig, canonicalTimeZone, emailAddress, parseUrl };\n\n\n// $now is in the WORKFLOW timezone, the one the Schedule trigger fires in.\nconst workflowTimezone = (typeof $now !== 'undefined' && $now && $now.zoneName) || '';\nconst check = validateConfig(CONFIG, { workflowTimezone });\nif (check.errors.length) {\n  throw new Error('Invalid Config (' + check.errors.length + ' problem' + (check.errors.length > 1 ? 's' : '') + '; edit the Config node or Workflow Settings): '\n    + check.errors.join(' | '));\n}\n\nconst input = $input.first().json || {};\nconst body = input.body || {};\nconst trigger = input.body !== undefined ? 'webhook' : (input.timestamp || input['Readable date'] ? 'schedule' : 'manual');\nconst runId = 'run-' + new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14) + '-' + Math.random().toString(36).slice(2, 6);\nreturn [{ json: { ...CONFIG, runId, trigger, workflowTimezone, configWarnings: check.warnings,\n  nowIso: new Date().toISOString(), dryRun: body.dryRun === true, force: body.force === true } }];"
       }
     },
     {
@@ -387,64 +387,51 @@
       "alwaysOutputData": true
     },
     {
-      "id": "n009-get-scrum-boards",
-      "name": "Get Scrum Boards",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "id": "n009-boards-request",
+      "name": "Boards Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         -160,
         60
       ],
       "parameters": {
-        "method": "GET",
-        "url": "={{ $('Config').first().json.jiraBaseUrl }}/rest/agile/1.0/board",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "jiraSoftwareCloudApi",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "maxResults",
-              "value": "={{ $('Config').first().json.pageSize }}"
-            }
-          ]
-        },
-        "options": {
-          "pagination": {
-            "pagination": {
-              "paginationMode": "updateAParameterInEachRequest",
-              "parameters": {
-                "parameters": [
-                  {
-                    "type": "qs",
-                    "name": "startAt",
-                    "value": "={{ $response.body.startAt + $response.body.maxResults }}"
-                  }
-                ]
-              },
-              "paginationCompleteWhen": "other",
-              "completeExpression": "={{ $response.body.isLast !== false }}",
-              "limitPagesFetched": true,
-              "maxRequests": 50,
-              "requestInterval": 200
-            }
-          },
-          "timeout": 30000
-        }
-      },
-      "credentials": {
-        "jiraSoftwareCloudApi": {
-          "id": "credJiraCloud001",
-          "name": "Jira Cloud (sprint monitor)"
-        }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 3000,
-      "executeOnce": true
+        "jsCode": "const jiraSpec = (cfg, path, query, paging, context, failOnError = false) => ({ path, query, paging, context, failOnError,\n  cfg: { jiraBaseUrl: cfg.jiraBaseUrl, maxPages: cfg.maxPages, jiraMaxRetries: cfg.jiraMaxRetries,\n    jiraRetryBaseDelayMs: cfg.jiraRetryBaseDelayMs, jiraRetryMaxDelayMs: cfg.jiraRetryMaxDelayMs, jiraPageIntervalMs: cfg.jiraPageIntervalMs } });\nconst cfg = $('Config').first().json;\nreturn [{ json: jiraSpec(cfg, '/rest/agile/1.0/board', { maxResults: cfg.pageSize }, 'startAt', null) }];"
+      }
     },
     {
-      "id": "n010-select-boards",
+      "id": "n010-get-scrum-boards",
+      "name": "Get Scrum Boards",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        -50,
+        220
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "jsHealthJiraGet1",
+          "cachedResultName": "Jira Sprint Health - Jira GET"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "n011-select-boards",
       "name": "Select Boards",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -453,72 +440,42 @@
         60
       ],
       "parameters": {
-        "jsCode": "const cfg = $('Config').first().json;\nconst wanted = (cfg.boardIds || []).map(String);\nconst types = (cfg.boardTypes || ['scrum', 'simple']).map(String);\nconst boards = [];\nfor (const page of $input.all()) for (const b of (page.json.values || [])) {\n  if (!types.includes(String(b.type))) continue; // e.g. company-managed kanban\n  if (!wanted.length || wanted.includes(String(b.id))) boards.push({ boardId: b.id, boardName: b.name, boardType: b.type });\n}\nif (!boards.length) throw new Error('No sprint-capable boards found (types ' + types.join('/') + (wanted.length ? ', boardIds ' + wanted.join(',') : '') + '). Check the Jira user can browse the project, or fix Config.boardIds / boardTypes.');\nreturn boards.map((json) => ({ json }));"
+        "jsCode": "const jiraSpec = (cfg, path, query, paging, context, failOnError = false) => ({ path, query, paging, context, failOnError,\n  cfg: { jiraBaseUrl: cfg.jiraBaseUrl, maxPages: cfg.maxPages, jiraMaxRetries: cfg.jiraMaxRetries,\n    jiraRetryBaseDelayMs: cfg.jiraRetryBaseDelayMs, jiraRetryMaxDelayMs: cfg.jiraRetryMaxDelayMs, jiraPageIntervalMs: cfg.jiraPageIntervalMs } });\nconst cfg = $('Config').first().json;\nconst wanted = (cfg.boardIds || []).map(String);\nconst types = (cfg.boardTypes || ['scrum', 'simple']).map(String);\nconst boards = [];\nfor (const page of $input.all()) {\n  if (page.json.error) throw new Error('Get Scrum Boards failed: ' + page.json.error.message);\n  for (const b of (page.json.values || [])) {\n  if (!types.includes(String(b.type))) continue; // e.g. company-managed kanban\n  if (!wanted.length || wanted.includes(String(b.id))) boards.push({ boardId: b.id, boardName: b.name, boardType: b.type });\n  }\n}\nif (!boards.length) throw new Error('No sprint-capable boards found (types ' + types.join('/') + (wanted.length ? ', boardIds ' + wanted.join(',') : '') + '). Check the Jira user can browse the project, or fix Config.boardIds / boardTypes.');\n// failOnError=false: a team-managed Kanban board answers 400 and Collect Sprints skips it\nreturn boards.map((b) => ({ json: jiraSpec(cfg, '/rest/agile/1.0/board/' + b.boardId + '/sprint',\n  { state: 'active', maxResults: cfg.pageSize }, 'startAt', b, false) }));"
       }
     },
     {
-      "id": "n011-get-active-sprints",
+      "id": "n012-get-active-sprints",
       "name": "Get Active Sprints",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
       "position": [
         280,
         60
       ],
       "parameters": {
-        "method": "GET",
-        "url": "={{ $('Config').first().json.jiraBaseUrl }}/rest/agile/1.0/board/{{ $json.boardId }}/sprint",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "jiraSoftwareCloudApi",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "state",
-              "value": "active"
-            },
-            {
-              "name": "maxResults",
-              "value": "={{ $('Config').first().json.pageSize }}"
-            }
-          ]
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "jsHealthJiraGet1",
+          "cachedResultName": "Jira Sprint Health - Jira GET"
         },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
         "options": {
-          "pagination": {
-            "pagination": {
-              "paginationMode": "updateAParameterInEachRequest",
-              "parameters": {
-                "parameters": [
-                  {
-                    "type": "qs",
-                    "name": "startAt",
-                    "value": "={{ $response.body.startAt + $response.body.maxResults }}"
-                  }
-                ]
-              },
-              "paginationCompleteWhen": "other",
-              "completeExpression": "={{ $response.body.isLast !== false }}",
-              "limitPagesFetched": true,
-              "maxRequests": 50,
-              "requestInterval": 200
-            }
-          },
-          "timeout": 30000
+          "waitForSubWorkflow": true
         }
-      },
-      "credentials": {
-        "jiraSoftwareCloudApi": {
-          "id": "credJiraCloud001",
-          "name": "Jira Cloud (sprint monitor)"
-        }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 3000,
-      "onError": "continueRegularOutput"
+      }
     },
     {
-      "id": "n012-collect-sprints",
+      "id": "n013-collect-sprints",
       "name": "Collect Sprints",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -527,11 +484,11 @@
         60
       ],
       "parameters": {
-        "jsCode": "// One item per active sprint, de-duplicated (a sprint can show on several boards).\n// Team-managed Kanban boards report type 'simple' too; Jira answers their sprint\n// call with HTTP 400 \"does not support sprints\". Skip those, fail on anything else.\nconst seen = new Map();\nfor (const page of $input.all()) {\n  if (page.json.error) {\n    const msg = JSON.stringify(page.json.error);\n    if (/support sprints|status code 400|\"400\"|Bad request/i.test(msg)) continue;\n    throw new Error('Get Active Sprints failed: ' + ((page.json.error && page.json.error.message) || msg));\n  }\n  for (const s of (page.json.values || [])) {\n    if (s.state !== 'active' || seen.has(s.id)) continue;\n    seen.set(s.id, { sprintId: s.id, name: s.name, goal: s.goal || '', startDate: s.startDate, endDate: s.endDate,\n      boardId: s.originBoardId || s.boardId || null });\n  }\n}\nif (!seen.size) return [{ json: { noActiveSprint: true } }];\nreturn [...seen.values()].map((json) => ({ json }));"
+        "jsCode": "// One item per active sprint, de-duplicated (a sprint can show on several boards).\n// Team-managed Kanban boards report type 'simple' too; Jira answers their sprint\n// call with HTTP 400 \"does not support sprints\". Skip those, fail on anything else.\n// A sprint is listed by its origin board AND by every other board whose filter\n// includes its issues. Keep one item per sprint but remember all of those boards,\n// so recipients of each board are routed correctly (see Analyze Sprints).\nconst boardNames = new Map($('Select Boards').all().map((i) => [String(i.json.context.boardId), i.json.context.boardName]));\nconst seen = new Map();\nfor (const page of $input.all()) {\n  const err = page.json.error;\n  if (err) {\n    if (err.statusCode === 400 || /support sprints/i.test(String(err.message))) continue;\n    throw new Error('Get Active Sprints failed: ' + (err.message || JSON.stringify(err)));\n  }\n  const listedOn = page.json._context || {};\n  for (const s of (page.json.values || [])) {\n    if (s.state !== 'active') continue;\n    if (!seen.has(s.id)) {\n      seen.set(s.id, { sprintId: s.id, name: s.name, goal: s.goal || '', startDate: s.startDate, endDate: s.endDate,\n        boardId: s.originBoardId || listedOn.boardId || null, boards: [] });\n    }\n    const e = seen.get(s.id);\n    for (const id of [s.originBoardId, listedOn.boardId]) {\n      if (id && !e.boards.some((b) => String(b.id) === String(id))) e.boards.push({ id: Number(id), name: boardNames.get(String(id)) || '' });\n    }\n  }\n}\nif (!seen.size) return [{ json: { noActiveSprint: true } }];\nreturn [...seen.values()].map((json) => ({ json }));"
       }
     },
     {
-      "id": "n013-has-active-sprint-",
+      "id": "n014-has-active-sprint-",
       "name": "Has Active Sprint?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -565,7 +522,7 @@
       }
     },
     {
-      "id": "n014-no-active-sprint",
+      "id": "n015-no-active-sprint",
       "name": "No Active Sprint",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -574,75 +531,55 @@
         300
       ],
       "parameters": {
-        "jsCode": "const cfg = $('Config').first().json;\nreturn [{ json: { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, finishedAt: new Date().toISOString(),\n  sent: 0, failed: 0, status: 'no_active_sprint', sprints: [] } }];"
+        "jsCode": "const cfg = $('Config').first().json;\nreturn [{ json: { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, finishedAt: new Date().toISOString(),\n  timezone: cfg.timezone, workflowTimezone: cfg.workflowTimezone, configWarnings: cfg.configWarnings || [],\n  sent: 0, failed: 0, status: 'no_active_sprint', sprints: [] } }];"
       }
     },
     {
-      "id": "n015-get-sprint-issues",
-      "name": "Get Sprint Issues",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "id": "n016-issues-request",
+      "name": "Issues Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         960,
         -60
       ],
       "parameters": {
-        "method": "GET",
-        "url": "={{ $('Config').first().json.jiraBaseUrl }}/rest/api/3/search/jql",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "jiraSoftwareCloudApi",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "jql",
-              "value": "=sprint = {{ $json.sprintId }} ORDER BY key"
-            },
-            {
-              "name": "fields",
-              "value": "={{ ['summary','status','assignee','duedate','priority','issuetype','created','updated','statuscategorychangedate','resolutiondate','issuelinks', $('Config').first().json.flaggedField, $('Config').first().json.storyPointsField].filter(Boolean).join(',') }}"
-            },
-            {
-              "name": "maxResults",
-              "value": "={{ $('Config').first().json.pageSize }}"
-            }
-          ]
-        },
-        "options": {
-          "pagination": {
-            "pagination": {
-              "paginationMode": "updateAParameterInEachRequest",
-              "parameters": {
-                "parameters": [
-                  {
-                    "type": "qs",
-                    "name": "nextPageToken",
-                    "value": "={{ $response.body.nextPageToken }}"
-                  }
-                ]
-              },
-              "paginationCompleteWhen": "other",
-              "completeExpression": "={{ !$response.body.nextPageToken || $response.body.isLast === true }}",
-              "limitPagesFetched": true,
-              "maxRequests": 50,
-              "requestInterval": 200
-            }
-          },
-          "timeout": 30000
-        }
-      },
-      "credentials": {
-        "jiraSoftwareCloudApi": {
-          "id": "credJiraCloud001",
-          "name": "Jira Cloud (sprint monitor)"
-        }
-      },
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 3000
+        "jsCode": "const jiraSpec = (cfg, path, query, paging, context, failOnError = false) => ({ path, query, paging, context, failOnError,\n  cfg: { jiraBaseUrl: cfg.jiraBaseUrl, maxPages: cfg.maxPages, jiraMaxRetries: cfg.jiraMaxRetries,\n    jiraRetryBaseDelayMs: cfg.jiraRetryBaseDelayMs, jiraRetryMaxDelayMs: cfg.jiraRetryMaxDelayMs, jiraPageIntervalMs: cfg.jiraPageIntervalMs } });\nconst cfg = $('Config').first().json;\nconst fields = ['summary','status','assignee','duedate','priority','issuetype','created','updated','statuscategorychangedate','resolutiondate','issuelinks', cfg.flaggedField, cfg.storyPointsField].filter(Boolean).join(',');\nreturn $input.all().map(({ json: s }) => ({ json: jiraSpec(cfg, '/rest/api/3/search/jql',\n  { jql: 'sprint = ' + s.sprintId + ' ORDER BY key', fields, maxResults: cfg.pageSize }, 'nextPageToken', s) }));"
+      }
     },
     {
-      "id": "n016-tag-pages-with-sprint",
+      "id": "n017-get-sprint-issues",
+      "name": "Get Sprint Issues",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1070,
+        -220
+      ],
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "jsHealthJiraGet1",
+          "cachedResultName": "Jira Sprint Health - Jira GET"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "n018-tag-pages-with-sprint",
       "name": "Tag Pages With Sprint",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -652,11 +589,11 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// Each response page from the paginated search is paired back to its sprint.\nconst s = $('Collect Sprints').item.json;\nreturn { json: { sprint: { id: s.sprintId, name: s.name, goal: s.goal, startDate: s.startDate, endDate: s.endDate, boardId: s.boardId },\n  issues: $json.issues || [] } };"
+        "jsCode": "// Each response page carries the sprint it was fetched for (_context).\nconst s = $json._context;\nif ($json.error) throw new Error('Get Sprint Issues failed for sprint ' + s.sprintId + ' (' + s.name + '): ' + $json.error.message);\nreturn { json: { sprint: { id: s.sprintId, name: s.name, goal: s.goal, startDate: s.startDate, endDate: s.endDate, boardId: s.boardId, boards: s.boards || [] },\n  issues: $json.issues || [] } };"
       }
     },
     {
-      "id": "n017-analyze-sprints",
+      "id": "n019-analyze-sprints",
       "name": "Analyze Sprints",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -665,11 +602,11 @@
         -60
       ],
       "parameters": {
-        "jsCode": "// Analyze Sprints: the core business logic of the Jira Sprint Health Monitor.\r\n// Pure function (no n8n globals) so it can be unit-tested with plain Node and\r\n// inlined into the \"Analyze Sprints\" Code node by scripts/build-workflows.js.\r\n\r\nconst DAY_MS = 864e5;\r\n\r\n// Jira returns offsets like \"+0530\"; JS Date wants \"+05:30\".\r\nfunction parseJiraDate(s) {\r\n  if (!s) return null;\r\n  const t = Date.parse(String(s).replace(/([+-]\\d{2})(\\d{2})$/, '$1:$2'));\r\n  return Number.isNaN(t) ? null : t;\r\n}\r\n\r\n// Calendar date (YYYY-MM-DD) as seen in the configured timezone.\r\nfunction localDate(ms, timeZone) {\r\n  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })\r\n    .format(new Date(ms));\r\n}\r\n\r\nfunction daysBetweenDates(a, b) {\r\n  // whole calendar days from date string a to date string b (b - a)\r\n  return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / DAY_MS);\r\n}\r\n\r\nfunction categoryOf(fields) {\r\n  const key = fields && fields.status && fields.status.statusCategory && fields.status.statusCategory.key;\r\n  if (key === 'done') return 'done';\r\n  if (key === 'indeterminate') return 'inprogress';\r\n  return 'todo';\r\n}\r\n\r\nfunction blockedReason(fields, config) {\r\n  const statusName = ((fields.status && fields.status.name) || '').toLowerCase();\r\n  const names = (config.blockedStatusNames || []).map((s) => String(s).toLowerCase());\r\n  if (names.includes(statusName)) return 'status';\r\n  const flag = config.flaggedField ? fields[config.flaggedField] : null;\r\n  if (flag && (!Array.isArray(flag) || flag.length > 0)) return 'flagged';\r\n  for (const link of fields.issuelinks || []) {\r\n    const inward = link.type && String(link.type.inward || '').toLowerCase();\r\n    const other = link.inwardIssue;\r\n    if (inward === 'is blocked by' && other) {\r\n      const otherCat = other.fields && other.fields.status && other.fields.status.statusCategory\r\n        && other.fields.status.statusCategory.key;\r\n      if (otherCat !== 'done') return 'blocked by ' + other.key;\r\n    }\r\n  }\r\n  return null;\r\n}\r\n\r\nfunction normalizeIssue(raw, ctx) {\r\n  const { config, nowMs, today } = ctx;\r\n  const f = raw.fields || {};\r\n  const category = categoryOf(f);\r\n  const isDone = category === 'done';\r\n  const blocked = isDone ? null : blockedReason(f, config);\r\n  const catChanged = parseJiraDate(f.statuscategorychangedate);\r\n  const inProgressDays = category === 'inprogress' && catChanged != null\r\n    ? (nowMs - catChanged) / DAY_MS : null;\r\n  const due = f.duedate || null; // date-only \"YYYY-MM-DD\"\r\n  const overdueDays = due && !isDone && due < today ? daysBetweenDates(due, today) : 0;\r\n  const rawPoints = config.storyPointsField ? f[config.storyPointsField] : null;\r\n  const points = typeof rawPoints === 'number' ? rawPoints : 0;\r\n  return {\r\n    key: raw.key,\r\n    summary: f.summary || '',\r\n    status: (f.status && f.status.name) || 'Unknown',\r\n    category,\r\n    bucket: blocked ? 'Blocked' : ({ todo: 'To Do', inprogress: 'In Progress', done: 'Done' })[category],\r\n    assignee: f.assignee ? (f.assignee.displayName || f.assignee.accountId) : null,\r\n    priority: (f.priority && f.priority.name) || '',\r\n    due,\r\n    points,\r\n    inProgressDays: inProgressDays == null ? null : Math.round(inProgressDays * 10) / 10,\r\n    flags: {\r\n      stale: inProgressDays != null && inProgressDays > config.staleInProgressDays && !blocked,\r\n      overdue: overdueDays > 0,\r\n      unassigned: !f.assignee && !isDone,\r\n      blocked: !!blocked,\r\n    },\r\n    overdueDays,\r\n    blockedReason: blocked,\r\n  };\r\n}\r\n\r\nfunction healthOf(m, config) {\r\n  const reasons = [];\r\n  if (m.total === 0) return { health: 'Empty', reasons: ['Sprint has no issues'] };\r\n  const behind = m.elapsedPct - m.completionPct;\r\n  if (m.blocked >= config.criticalBlockedCount) reasons.push(`${m.blocked} issues blocked`);\r\n  if (behind >= config.criticalBehindPct) reasons.push(`${behind} pts behind schedule`);\r\n  if (reasons.length) return { health: 'Critical', reasons };\r\n  if (m.blocked > 0) reasons.push(`${m.blocked} blocked`);\r\n  if (m.overdue > 0) reasons.push(`${m.overdue} overdue`);\r\n  if (behind >= config.atRiskBehindPct) reasons.push(`${behind} pts behind schedule`);\r\n  if (m.overloaded > 0) reasons.push(`${m.overloaded} overloaded member(s)`);\r\n  if (reasons.length) return { health: 'At Risk', reasons };\r\n  return { health: 'Healthy', reasons: ['On track'] };\r\n}\r\n\r\nfunction pct(n, d) { return d > 0 ? Math.round((n / d) * 100) : 0; }\r\n\r\nfunction analyzeSprint(sprint, rawIssues, ctx) {\r\n  const { config, nowMs, today, history, recipients, runId, dryRun, force } = ctx;\r\n  // de-duplicate issues by key (defensive against overlapping pages)\r\n  const seen = new Set();\r\n  const issues = [];\r\n  for (const r of rawIssues) {\r\n    if (!r || !r.key || seen.has(r.key)) continue;\r\n    seen.add(r.key);\r\n    issues.push(normalizeIssue(r, ctx));\r\n  }\r\n  const count = (fn) => issues.filter(fn).length;\r\n  const startMs = parseJiraDate(sprint.startDate);\r\n  const endMs = parseJiraDate(sprint.endDate);\r\n  const elapsedPct = startMs && endMs && endMs > startMs\r\n    ? Math.max(0, Math.min(100, Math.round(((nowMs - startMs) / (endMs - startMs)) * 100))) : 0;\r\n  const daysLeft = endMs ? Math.max(0, Math.ceil((endMs - nowMs) / DAY_MS)) : null;\r\n\r\n  // workload per assignee (unresolved only)\r\n  const byPerson = {};\r\n  for (const i of issues) {\r\n    if (i.category === 'done' || !i.assignee) continue;\r\n    const p = byPerson[i.assignee] || (byPerson[i.assignee] = { name: i.assignee, open: 0, inProgress: 0, blocked: 0, points: 0 });\r\n    p.open += 1;\r\n    if (i.bucket === 'In Progress') p.inProgress += 1;\r\n    if (i.bucket === 'Blocked') p.blocked += 1;\r\n    p.points += i.points;\r\n  }\r\n  const workload = Object.values(byPerson)\r\n    .map((p) => ({ ...p, overloaded: p.open >= config.overloadThreshold }))\r\n    .sort((a, b) => b.open - a.open || a.name.localeCompare(b.name));\r\n\r\n  const m = {\r\n    total: issues.length,\r\n    todo: count((i) => i.bucket === 'To Do'),\r\n    inProgress: count((i) => i.bucket === 'In Progress'),\r\n    done: count((i) => i.bucket === 'Done'),\r\n    blocked: count((i) => i.bucket === 'Blocked'),\r\n    stale: count((i) => i.flags.stale),\r\n    overdue: count((i) => i.flags.overdue),\r\n    unassigned: count((i) => i.flags.unassigned),\r\n    overloaded: workload.filter((p) => p.overloaded).length,\r\n    pointsTotal: issues.reduce((s, i) => s + i.points, 0),\r\n    pointsDone: issues.filter((i) => i.category === 'done').reduce((s, i) => s + i.points, 0),\r\n    elapsedPct,\r\n    daysLeft,\r\n  };\r\n  m.completionPct = pct(m.done, m.total);\r\n  m.pointsPct = pct(m.pointsDone, m.pointsTotal);\r\n  const { health, reasons } = healthOf(m, config);\r\n\r\n  // previous sent snapshot for this sprint (strictly before today) -> day-over-day delta\r\n  const digestKey = `${sprint.id}:${today}`;\r\n  const prev = history\r\n    .filter((r) => String(r.sprint_id) === String(sprint.id) && r.status === 'sent' && r.run_date < today)\r\n    .sort((a, b) => (a.run_date < b.run_date ? 1 : -1))[0] || null;\r\n  const delta = prev ? {\r\n    since: prev.run_date,\r\n    completionPct: m.completionPct - Number(prev.completion_pct || 0),\r\n    done: m.done - Number(prev.done || 0),\r\n    blocked: m.blocked - Number(prev.blocked || 0),\r\n  } : null;\r\n\r\n  // dedupe decision against today's rows (the claim step re-checks under race)\r\n  const todays = history.filter((r) => r.digest_key === digestKey);\r\n  const staleClaimMs = config.staleClaimMinutes * 60e3;\r\n  const to = recipients\r\n    .filter((r) => r.active !== false && (r.role || 'digest') === 'digest')\r\n    .filter((r) => !Number(r.board_id) || String(r.board_id) === String(sprint.boardId))\r\n    .map((r) => String(r.email).trim()).filter(Boolean);\r\n  const uniqueTo = [...new Set(to)];\r\n  let action = 'send';\r\n  if (!uniqueTo.length) action = 'skip_no_recipients';\r\n  else if (!force && todays.some((r) => r.status === 'sent')) action = 'skip_already_sent';\r\n  else if (!force && todays.some((r) => r.status === 'pending'\r\n    && nowMs - (parseJiraDate(r.claimed_at) || 0) < staleClaimMs)) action = 'skip_in_flight';\r\n  if (dryRun && action === 'send') action = 'preview';\r\n\r\n  const lists = {\r\n    blocked: issues.filter((i) => i.flags.blocked),\r\n    stale: issues.filter((i) => i.flags.stale).sort((a, b) => b.inProgressDays - a.inProgressDays),\r\n    overdue: issues.filter((i) => i.flags.overdue).sort((a, b) => b.overdueDays - a.overdueDays),\r\n    unassigned: issues.filter((i) => i.flags.unassigned),\r\n  };\r\n\r\n  const d = {\r\n    digest_key: digestKey,\r\n    run_id: runId,\r\n    run_date: today,\r\n    sprint_id: Number(sprint.id),\r\n    sprint_name: sprint.name || `Sprint ${sprint.id}`,\r\n    board_id: Number(sprint.boardId) || 0,\r\n    sprint_goal: sprint.goal || '',\r\n    sprint_start: sprint.startDate || '',\r\n    sprint_end: sprint.endDate || '',\r\n    health,\r\n    health_reasons: reasons,\r\n    metrics: m,\r\n    workload,\r\n    lists,\r\n    delta,\r\n    recipients: uniqueTo,\r\n    action,\r\n  };\r\n  const email = renderEmail(d, config);\r\n  d.subject = email.subject;\r\n  d.html = email.html;\r\n  d.text = email.text;\r\n  return d;\r\n}\r\n\r\nfunction esc(s) {\r\n  return String(s == null ? '' : s).replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' })[c]);\r\n}\r\n\r\nconst HEALTH_COLOR = { Healthy: '#1a7f5a', 'At Risk': '#c26a00', Critical: '#c62828', Empty: '#5f6b7a' };\r\n\r\nfunction renderEmail(d, config) {\r\n  const m = d.metrics;\r\n  const browse = (k) => `${String(config.jiraBaseUrl || '').replace(/\\/+$/, '')}/browse/${k}`;\r\n  const deltaTxt = d.delta\r\n    ? `${d.delta.completionPct >= 0 ? '+' : ''}${d.delta.completionPct} pts vs ${d.delta.since}`\r\n    : 'first digest for this sprint';\r\n  const subject = `[Sprint Health] ${d.sprint_name} | ${d.health} | ${m.completionPct}% done | ${d.run_date}`;\r\n\r\n  const issueRows = (list, extra) => list.slice(0, config.maxListItems).map((i) =>\r\n    `<tr><td style=\"padding:4px 8px;width:90px\"><a href=\"${esc(browse(i.key))}\">${esc(i.key)}</a></td>`\r\n    + `<td style=\"padding:4px 8px\">${esc(i.summary)}</td>`\r\n    + `<td style=\"padding:4px 8px;width:120px\">${esc(i.assignee || 'Unassigned')}</td>`\r\n    + `<td style=\"padding:4px 8px;width:170px\">${esc(extra(i))}</td></tr>`).join('');\r\n  const section = (title, list, extra) => list.length\r\n    ? `<h3 style=\"margin:18px 0 6px;font-size:15px\">${esc(title)} (${list.length})</h3>`\r\n      + `<table style=\"border-collapse:collapse;font-size:13px;width:100%;table-layout:fixed\">${issueRows(list, extra)}</table>`\r\n      + (list.length > config.maxListItems ? `<p style=\"font-size:12px;color:#5f6b7a\">+${list.length - config.maxListItems} more</p>` : '')\r\n    : '';\r\n  const work = d.workload.map((p) =>\r\n    `<tr><td style=\"padding:4px 8px\">${esc(p.name)}${p.overloaded ? ' <b style=\"color:#c62828\">(overloaded)</b>' : ''}</td>`\r\n    + `<td style=\"padding:4px 8px;text-align:right\">${p.open}</td><td style=\"padding:4px 8px;text-align:right\">${p.inProgress}</td>`\r\n    + `<td style=\"padding:4px 8px;text-align:right\">${p.blocked}</td></tr>`).join('');\r\n\r\n  const html = `<div style=\"font-family:Segoe UI,Arial,sans-serif;color:#1b2430;max-width:720px\">\r\n<h2 style=\"margin:0 0 4px\">${esc(d.sprint_name)}: <span style=\"color:${HEALTH_COLOR[d.health]}\">${esc(d.health)}</span></h2>\r\n<p style=\"margin:0 0 12px;color:#5f6b7a\">Daily sprint health digest for ${esc(d.run_date)} (${esc(config.timezone)}). ${esc(d.health_reasons.join('; '))}.</p>\r\n${d.sprint_goal ? `<p style=\"margin:0 0 12px\"><b>Goal:</b> ${esc(d.sprint_goal)}</p>` : ''}\r\n<table style=\"border-collapse:collapse;font-size:14px;margin-bottom:8px\"><tr>\r\n<td style=\"padding:6px 12px;background:#eef2f7\"><b>${m.completionPct}%</b> done (${m.done}/${m.total})</td>\r\n<td style=\"padding:6px 12px;background:#eef2f7\"><b>${m.elapsedPct}%</b> of sprint elapsed${m.daysLeft != null ? `, ${m.daysLeft} day(s) left` : ''}</td>\r\n<td style=\"padding:6px 12px;background:#eef2f7\">${esc(deltaTxt)}</td></tr></table>\r\n<table style=\"border-collapse:collapse;font-size:14px\"><tr>\r\n<td style=\"padding:6px 12px\">To Do: <b>${m.todo}</b></td><td style=\"padding:6px 12px\">In Progress: <b>${m.inProgress}</b></td>\r\n<td style=\"padding:6px 12px\">Done: <b>${m.done}</b></td><td style=\"padding:6px 12px\">Blocked: <b>${m.blocked}</b></td></tr></table>\r\n${m.pointsTotal ? `<p style=\"font-size:13px;color:#5f6b7a\">Story points: ${m.pointsDone}/${m.pointsTotal} (${m.pointsPct}%)</p>` : ''}\r\n${section('Blocked', d.lists.blocked, (i) => i.blockedReason)}\r\n${section(`In Progress for more than ${config.staleInProgressDays} days`, d.lists.stale, (i) => `${i.inProgressDays} days`)}\r\n${section('Overdue', d.lists.overdue, (i) => `due ${i.due} (${i.overdueDays}d late)`)}\r\n${section('Unassigned', d.lists.unassigned, (i) => i.status)}\r\n${d.workload.length ? `<h3 style=\"margin:18px 0 6px;font-size:15px\">Workload (unresolved issues)</h3>\r\n<table style=\"border-collapse:collapse;font-size:13px\"><tr style=\"color:#5f6b7a\"><td style=\"padding:4px 8px\">Member</td><td style=\"padding:4px 8px\">Open</td><td style=\"padding:4px 8px\">In progress</td><td style=\"padding:4px 8px\">Blocked</td></tr>${work}</table>` : ''}\r\n<p style=\"margin-top:20px;font-size:11px;color:#8a94a3\">Generated by the n8n Jira Sprint Health Monitor. Run ${esc(d.run_id)}. Overload threshold: ${config.overloadThreshold} open issues.</p>\r\n</div>`;\r\n\r\n  const line = (title, list, extra) => list.length\r\n    ? `\\n${title} (${list.length}):\\n` + list.slice(0, config.maxListItems).map((i) => `  - ${i.key} ${i.summary} [${i.assignee || 'Unassigned'}] ${extra(i)}`).join('\\n')\r\n    : '';\r\n  const text = `${d.sprint_name}: ${d.health} (${d.health_reasons.join('; ')})\r\nDate: ${d.run_date} (${config.timezone})\r\nCompletion: ${m.completionPct}% (${m.done}/${m.total}); sprint elapsed ${m.elapsedPct}%; ${deltaTxt}\r\nTo Do ${m.todo} | In Progress ${m.inProgress} | Done ${m.done} | Blocked ${m.blocked}`\r\n    + line('Blocked', d.lists.blocked, (i) => i.blockedReason)\r\n    + line(`In Progress > ${config.staleInProgressDays} days`, d.lists.stale, (i) => `${i.inProgressDays}d`)\r\n    + line('Overdue', d.lists.overdue, (i) => `due ${i.due}`)\r\n    + line('Unassigned', d.lists.unassigned, (i) => i.status)\r\n    + (d.workload.length ? '\\n\\nWorkload: ' + d.workload.map((p) => `${p.name} ${p.open}${p.overloaded ? ' (overloaded)' : ''}`).join(', ') : '')\r\n    + '\\n';\r\n  return { subject, html, text };\r\n}\r\n\r\n// pages: [{ sprint: {id,name,boardId,startDate,endDate,goal}, issues: [...] }]\r\nfunction analyzeSprints({ pages, config, history, recipients, now, runId, dryRun, force }) {\r\n  const nowMs = now instanceof Date ? now.getTime() : Number(now);\r\n  const today = localDate(nowMs, config.timezone);\r\n  const bySprint = new Map();\r\n  for (const p of pages) {\r\n    if (!p || !p.sprint) continue;\r\n    const id = String(p.sprint.id);\r\n    if (!bySprint.has(id)) bySprint.set(id, { sprint: p.sprint, issues: [] });\r\n    bySprint.get(id).issues.push(...(p.issues || []));\r\n  }\r\n  const ctx = { config, nowMs, today, history: history || [], recipients: recipients || [], runId, dryRun: !!dryRun, force: !!force };\r\n  return [...bySprint.values()].map(({ sprint, issues }) => analyzeSprint(sprint, issues, ctx));\r\n}\r\n\r\nif (typeof module !== 'undefined' && module.exports) {\r\n  module.exports = { analyzeSprints, parseJiraDate, localDate, normalizeIssue, blockedReason, healthOf, renderEmail };\r\n}\r\n\n\n// ---- n8n wiring\nconst cfg = $('Config').first().json;\nconst rows = (name) => $(name).all().map((i) => i.json).filter((r) => r && r.id != null);\nreturn analyzeSprints({\n  pages: $input.all().map((i) => i.json),\n  config: cfg,\n  history: rows('Get Recent History'),\n  recipients: rows('Get Recipients'),\n  now: new Date(cfg.nowIso),\n  runId: cfg.runId,\n  dryRun: cfg.dryRun,\n  force: cfg.force,\n}).map((json) => ({ json }));"
+        "jsCode": "// Analyze Sprints: the core business logic of the Jira Sprint Health Monitor.\n// Pure function (no n8n globals) so it can be unit-tested with plain Node and\n// inlined into the \"Analyze Sprints\" Code node by scripts/build-workflows.js.\n\nconst DAY_MS = 864e5;\n\n// Jira returns offsets like \"+0530\"; JS Date wants \"+05:30\".\nfunction parseJiraDate(s) {\n  if (!s) return null;\n  const t = Date.parse(String(s).replace(/([+-]\\d{2})(\\d{2})$/, '$1:$2'));\n  return Number.isNaN(t) ? null : t;\n}\n\n// Calendar date (YYYY-MM-DD) as seen in the configured timezone.\nfunction localDate(ms, timeZone) {\n  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' })\n    .format(new Date(ms));\n}\n\nfunction daysBetweenDates(a, b) {\n  // whole calendar days from date string a to date string b (b - a)\n  return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / DAY_MS);\n}\n\nfunction categoryOf(fields) {\n  const key = fields && fields.status && fields.status.statusCategory && fields.status.statusCategory.key;\n  if (key === 'done') return 'done';\n  if (key === 'indeterminate') return 'inprogress';\n  return 'todo';\n}\n\nfunction blockedReason(fields, config) {\n  const statusName = ((fields.status && fields.status.name) || '').toLowerCase();\n  const names = (config.blockedStatusNames || []).map((s) => String(s).toLowerCase());\n  if (names.includes(statusName)) return 'status';\n  const flag = config.flaggedField ? fields[config.flaggedField] : null;\n  if (flag && (!Array.isArray(flag) || flag.length > 0)) return 'flagged';\n  for (const link of fields.issuelinks || []) {\n    const inward = link.type && String(link.type.inward || '').toLowerCase();\n    const other = link.inwardIssue;\n    if (inward === 'is blocked by' && other) {\n      const otherCat = other.fields && other.fields.status && other.fields.status.statusCategory\n        && other.fields.status.statusCategory.key;\n      if (otherCat !== 'done') return 'blocked by ' + other.key;\n    }\n  }\n  return null;\n}\n\nfunction normalizeIssue(raw, ctx) {\n  const { config, nowMs, today } = ctx;\n  const f = raw.fields || {};\n  const category = categoryOf(f);\n  const isDone = category === 'done';\n  const blocked = isDone ? null : blockedReason(f, config);\n  const catChanged = parseJiraDate(f.statuscategorychangedate);\n  const inProgressDays = category === 'inprogress' && catChanged != null\n    ? (nowMs - catChanged) / DAY_MS : null;\n  const due = f.duedate || null; // date-only \"YYYY-MM-DD\"\n  const overdueDays = due && !isDone && due < today ? daysBetweenDates(due, today) : 0;\n  const rawPoints = config.storyPointsField ? f[config.storyPointsField] : null;\n  const estimated = typeof rawPoints === 'number' && Number.isFinite(rawPoints);\n  const points = estimated ? rawPoints : 0;\n  return {\n    key: raw.key,\n    summary: f.summary || '',\n    status: (f.status && f.status.name) || 'Unknown',\n    category,\n    bucket: blocked ? 'Blocked' : ({ todo: 'To Do', inprogress: 'In Progress', done: 'Done' })[category],\n    // accountId is the stable identity; display names are not unique (two \"Rahul\"s)\n    assigneeId: f.assignee ? (f.assignee.accountId || f.assignee.displayName || null) : null,\n    assignee: f.assignee ? (f.assignee.displayName || f.assignee.accountId) : null,\n    priority: (f.priority && f.priority.name) || '',\n    due,\n    points,\n    estimated,\n    inProgressDays: inProgressDays == null ? null : Math.round(inProgressDays * 10) / 10,\n    flags: {\n      stale: inProgressDays != null && inProgressDays > config.staleInProgressDays && !blocked,\n      overdue: overdueDays > 0,\n      unassigned: !f.assignee && !isDone,\n      blocked: !!blocked,\n    },\n    overdueDays,\n    blockedReason: blocked,\n  };\n}\n\n// Two different people can share a display name. Group by accountId everywhere and,\n// only when a name is ambiguous within the sprint, show \"Name (…1a2b)\" so the\n// digest tells them apart.\nfunction labelAssignees(issues) {\n  const idsByName = new Map();\n  for (const i of issues) {\n    if (!i.assigneeId) continue;\n    if (!idsByName.has(i.assignee)) idsByName.set(i.assignee, new Set());\n    idsByName.get(i.assignee).add(i.assigneeId);\n  }\n  for (const i of issues) {\n    if (i.assigneeId && idsByName.get(i.assignee).size > 1) {\n      i.assignee = `${i.assignee} (…${String(i.assigneeId).slice(-4)})`;\n    }\n  }\n}\n\n// Progress used for health: issue count, story points, or the lower of the two.\n// Story points only count when enough of the sprint is estimated; otherwise a\n// sprint with one 13-point story done would look 90% complete.\nfunction progressOf(m, config) {\n  const basis = config.progressBasis || 'both';\n  const minCoverage = config.minPointsCoveragePct == null ? 50 : config.minPointsCoveragePct;\n  const pointsUsable = m.pointsTotal > 0 && m.pointsCoveragePct >= minCoverage;\n  if (basis === 'issues' || !pointsUsable) {\n    return { progressPct: m.completionPct, progressBy: 'issues', pointsUsable };\n  }\n  if (basis === 'points' || m.pointsPct < m.completionPct) {\n    return { progressPct: m.pointsPct, progressBy: 'story points', pointsUsable };\n  }\n  return { progressPct: m.completionPct, progressBy: 'issues', pointsUsable };\n}\n\nfunction healthOf(m, config) {\n  const reasons = [];\n  if (m.total === 0) return { health: 'Empty', reasons: ['Sprint has no issues'] };\n  const progress = m.progressPct == null ? m.completionPct : m.progressPct;\n  const behind = m.elapsedPct - progress;\n  const behindTxt = `${behind}% behind schedule (by ${m.progressBy || 'issues'})`;\n  if (m.blocked >= config.criticalBlockedCount) reasons.push(`${m.blocked} issues blocked`);\n  if (behind >= config.criticalBehindPct) reasons.push(behindTxt);\n  if (reasons.length) return { health: 'Critical', reasons };\n  if (m.blocked > 0) reasons.push(`${m.blocked} blocked`);\n  if (m.overdue > 0) reasons.push(`${m.overdue} overdue`);\n  if (behind >= config.atRiskBehindPct) reasons.push(behindTxt);\n  if (m.overloaded > 0) reasons.push(`${m.overloaded} overloaded member(s)`);\n  if (reasons.length) return { health: 'At Risk', reasons };\n  return { health: 'Healthy', reasons: ['On track'] };\n}\n\nfunction pct(n, d) { return d > 0 ? Math.round((n / d) * 100) : 0; }\n\nfunction analyzeSprint(sprint, rawIssues, ctx) {\n  const { config, nowMs, today, history, recipients, runId, dryRun, force } = ctx;\n  // de-duplicate issues by key (defensive against overlapping pages)\n  const seen = new Set();\n  const issues = [];\n  for (const r of rawIssues) {\n    if (!r || !r.key || seen.has(r.key)) continue;\n    seen.add(r.key);\n    issues.push(normalizeIssue(r, ctx));\n  }\n  labelAssignees(issues);\n  const count = (fn) => issues.filter(fn).length;\n  const startMs = parseJiraDate(sprint.startDate);\n  const endMs = parseJiraDate(sprint.endDate);\n  const elapsedPct = startMs && endMs && endMs > startMs\n    ? Math.max(0, Math.min(100, Math.round(((nowMs - startMs) / (endMs - startMs)) * 100))) : 0;\n  const daysLeft = endMs ? Math.max(0, Math.ceil((endMs - nowMs) / DAY_MS)) : null;\n\n  // workload per assignee (unresolved only), keyed by accountId, not display name\n  const byPerson = {};\n  for (const i of issues) {\n    if (i.category === 'done' || !i.assigneeId) continue;\n    const p = byPerson[i.assigneeId]\n      || (byPerson[i.assigneeId] = { accountId: i.assigneeId, name: i.assignee, open: 0, inProgress: 0, blocked: 0, points: 0 });\n    p.open += 1;\n    if (i.bucket === 'In Progress') p.inProgress += 1;\n    if (i.bucket === 'Blocked') p.blocked += 1;\n    p.points += i.points;\n  }\n  const workload = Object.values(byPerson)\n    .map((p) => ({ ...p, overloaded: p.open >= config.overloadThreshold }))\n    .sort((a, b) => b.open - a.open || a.name.localeCompare(b.name) || a.accountId.localeCompare(b.accountId));\n\n  const m = {\n    total: issues.length,\n    todo: count((i) => i.bucket === 'To Do'),\n    inProgress: count((i) => i.bucket === 'In Progress'),\n    done: count((i) => i.bucket === 'Done'),\n    blocked: count((i) => i.bucket === 'Blocked'),\n    stale: count((i) => i.flags.stale),\n    overdue: count((i) => i.flags.overdue),\n    unassigned: count((i) => i.flags.unassigned),\n    overloaded: workload.filter((p) => p.overloaded).length,\n    pointsTotal: issues.reduce((s, i) => s + i.points, 0),\n    pointsDone: issues.filter((i) => i.category === 'done').reduce((s, i) => s + i.points, 0),\n    estimated: count((i) => i.estimated),\n    elapsedPct,\n    daysLeft,\n  };\n  m.completionPct = pct(m.done, m.total);\n  m.pointsPct = pct(m.pointsDone, m.pointsTotal);\n  m.pointsCoveragePct = pct(m.estimated, m.total);\n  Object.assign(m, progressOf(m, config));\n  const { health, reasons } = healthOf(m, config);\n\n  // previous sent snapshot for this sprint (strictly before today) -> day-over-day delta\n  const digestKey = `${sprint.id}:${today}`;\n  const prev = history\n    .filter((r) => String(r.sprint_id) === String(sprint.id) && r.status === 'sent' && r.run_date < today)\n    .sort((a, b) => (a.run_date < b.run_date ? 1 : -1))[0] || null;\n  const delta = prev ? {\n    since: prev.run_date,\n    completionPct: m.completionPct - Number(prev.completion_pct || 0),\n    done: m.done - Number(prev.done || 0),\n    blocked: m.blocked - Number(prev.blocked || 0),\n    pointsPct: Number(prev.points_total) > 0 && m.pointsTotal > 0\n      ? m.pointsPct - pct(Number(prev.points_done || 0), Number(prev.points_total)) : null,\n  } : null;\n\n  // dedupe decision against today's rows (the claim step re-checks under race)\n  const todays = history.filter((r) => r.digest_key === digestKey);\n  const staleClaimMs = config.staleClaimMinutes * 60e3;\n  // A sprint can show on several boards (its origin board plus any board whose\n  // filter includes its issues). Route to recipients of ANY of those boards, or\n  // only the origin board when Config.sprintBoardRouting = 'origin'.\n  const boards = (Array.isArray(sprint.boards) && sprint.boards.length)\n    ? sprint.boards : (sprint.boardId ? [{ id: sprint.boardId, name: '' }] : []);\n  const routeBoards = (config.sprintBoardRouting === 'origin' && sprint.boardId ? [sprint.boardId] : boards.map((b) => b.id))\n    .map((id) => String(Number(id)));\n  const to = recipients\n    .filter((r) => r.active !== false && (r.role || 'digest') === 'digest')\n    .filter((r) => !Number(r.board_id) || routeBoards.includes(String(Number(r.board_id))))\n    .map((r) => String(r.email).trim()).filter(Boolean);\n  const uniqueTo = [...new Set(to)];\n  let action = 'send';\n  if (!uniqueTo.length) action = 'skip_no_recipients';\n  else if (!force && todays.some((r) => r.status === 'sent')) action = 'skip_already_sent';\n  else if (!force && todays.some((r) => r.status === 'pending'\n    && nowMs - (parseJiraDate(r.claimed_at) || 0) < staleClaimMs)) action = 'skip_in_flight';\n  if (dryRun && action === 'send') action = 'preview';\n\n  const lists = {\n    blocked: issues.filter((i) => i.flags.blocked),\n    stale: issues.filter((i) => i.flags.stale).sort((a, b) => b.inProgressDays - a.inProgressDays),\n    overdue: issues.filter((i) => i.flags.overdue).sort((a, b) => b.overdueDays - a.overdueDays),\n    unassigned: issues.filter((i) => i.flags.unassigned),\n  };\n\n  const d = {\n    digest_key: digestKey,\n    run_id: runId,\n    run_date: today,\n    sprint_id: Number(sprint.id),\n    sprint_name: sprint.name || `Sprint ${sprint.id}`,\n    board_id: Number(sprint.boardId) || 0,\n    board_ids: boards.map((b) => Number(b.id)),\n    boards,\n    sprint_goal: sprint.goal || '',\n    sprint_start: sprint.startDate || '',\n    sprint_end: sprint.endDate || '',\n    health,\n    health_reasons: reasons,\n    metrics: m,\n    workload,\n    lists,\n    delta,\n    recipients: uniqueTo,\n    action,\n  };\n  const email = renderEmail(d, config);\n  d.subject = email.subject;\n  d.html = email.html;\n  d.text = email.text;\n  return d;\n}\n\nfunction esc(s) {\n  return String(s == null ? '' : s).replace(/[&<>\"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;' })[c]);\n}\n\nconst HEALTH_COLOR = { Healthy: '#1a7f5a', 'At Risk': '#c26a00', Critical: '#c62828', Empty: '#5f6b7a' };\n\nfunction renderEmail(d, config) {\n  const m = d.metrics;\n  const browse = (k) => `${String(config.jiraBaseUrl || '').replace(/\\/+$/, '')}/browse/${k}`;\n  const sign = (n) => `${n >= 0 ? '+' : ''}${n}`;\n  const deltaTxt = d.delta\n    ? `${sign(d.delta.completionPct)} pts vs ${d.delta.since}`\n      + (d.delta.pointsPct != null && m.pointsUsable ? ` (story points ${sign(d.delta.pointsPct)} pts)` : '')\n    : 'first digest for this sprint';\n  const pointsTxt = m.pointsTotal\n    ? `Story points: ${m.pointsDone}/${m.pointsTotal} done (${m.pointsPct}%), ${m.estimated} of ${m.total} issues estimated.`\n      + (m.pointsUsable ? '' : ` Not used for health: under ${config.minPointsCoveragePct == null ? 50 : config.minPointsCoveragePct}% of issues are estimated.`)\n    : '';\n  const basisTxt = ({ issues: 'issue count', points: 'story points', both: 'the lower of issue-count and story-point progress' })[config.progressBasis || 'both'];\n  const boardsTxt = d.boards.length > 1 ? `Boards: ${d.boards.map((b) => b.name || `#${b.id}`).join(', ')}` : '';\n  const subject = `[Sprint Health] ${d.sprint_name} | ${d.health} | ${m.completionPct}% done | ${d.run_date}`;\n\n  const issueRows = (list, extra) => list.slice(0, config.maxListItems).map((i) =>\n    `<tr><td style=\"padding:4px 8px;width:90px\"><a href=\"${esc(browse(i.key))}\">${esc(i.key)}</a></td>`\n    + `<td style=\"padding:4px 8px\">${esc(i.summary)}</td>`\n    + `<td style=\"padding:4px 8px;width:120px\">${esc(i.assignee || 'Unassigned')}</td>`\n    + `<td style=\"padding:4px 8px;width:170px\">${esc(extra(i))}</td></tr>`).join('');\n  const section = (title, list, extra) => list.length\n    ? `<h3 style=\"margin:18px 0 6px;font-size:15px\">${esc(title)} (${list.length})</h3>`\n      + `<table style=\"border-collapse:collapse;font-size:13px;width:100%;table-layout:fixed\">${issueRows(list, extra)}</table>`\n      + (list.length > config.maxListItems ? `<p style=\"font-size:12px;color:#5f6b7a\">+${list.length - config.maxListItems} more</p>` : '')\n    : '';\n  const work = d.workload.map((p) =>\n    `<tr><td style=\"padding:4px 8px\">${esc(p.name)}${p.overloaded ? ' <b style=\"color:#c62828\">(overloaded)</b>' : ''}</td>`\n    + `<td style=\"padding:4px 8px;text-align:right\">${p.open}</td><td style=\"padding:4px 8px;text-align:right\">${p.inProgress}</td>`\n    + `<td style=\"padding:4px 8px;text-align:right\">${p.blocked}</td></tr>`).join('');\n\n  const html = `<div style=\"font-family:Segoe UI,Arial,sans-serif;color:#1b2430;max-width:720px\">\n<h2 style=\"margin:0 0 4px\">${esc(d.sprint_name)}: <span style=\"color:${HEALTH_COLOR[d.health]}\">${esc(d.health)}</span></h2>\n<p style=\"margin:0 0 12px;color:#5f6b7a\">Daily sprint health digest for ${esc(d.run_date)} (${esc(config.timezone)}). ${esc(d.health_reasons.join('; '))}.</p>\n${d.sprint_goal ? `<p style=\"margin:0 0 12px\"><b>Goal:</b> ${esc(d.sprint_goal)}</p>` : ''}\n<table style=\"border-collapse:collapse;font-size:14px;margin-bottom:8px\"><tr>\n<td style=\"padding:6px 12px;background:#eef2f7\"><b>${m.completionPct}%</b> of issues done (${m.done}/${m.total})</td>\n${m.pointsTotal ? `<td style=\"padding:6px 12px;background:#eef2f7\"><b>${m.pointsPct}%</b> of story points (${m.pointsDone}/${m.pointsTotal})</td>` : ''}\n<td style=\"padding:6px 12px;background:#eef2f7\"><b>${m.elapsedPct}%</b> of sprint elapsed${m.daysLeft != null ? `, ${m.daysLeft} day(s) left` : ''}</td>\n<td style=\"padding:6px 12px;background:#eef2f7\">${esc(deltaTxt)}</td></tr></table>\n<table style=\"border-collapse:collapse;font-size:14px\"><tr>\n<td style=\"padding:6px 12px\">To Do: <b>${m.todo}</b></td><td style=\"padding:6px 12px\">In Progress: <b>${m.inProgress}</b></td>\n<td style=\"padding:6px 12px\">Done: <b>${m.done}</b></td><td style=\"padding:6px 12px\">Blocked: <b>${m.blocked}</b></td></tr></table>\n<p style=\"font-size:13px;color:#5f6b7a\">Health compares sprint time elapsed with ${esc(basisTxt)} (${esc(m.progressBy)}: ${m.progressPct}%). ${esc(pointsTxt)}${boardsTxt ? ' ' + esc(boardsTxt) + '.' : ''}</p>\n${section('Blocked', d.lists.blocked, (i) => i.blockedReason)}\n${section(`In Progress for more than ${config.staleInProgressDays} days`, d.lists.stale, (i) => `${i.inProgressDays} days`)}\n${section('Overdue', d.lists.overdue, (i) => `due ${i.due} (${i.overdueDays}d late)`)}\n${section('Unassigned', d.lists.unassigned, (i) => i.status)}\n${d.workload.length ? `<h3 style=\"margin:18px 0 6px;font-size:15px\">Workload (unresolved issues)</h3>\n<table style=\"border-collapse:collapse;font-size:13px\"><tr style=\"color:#5f6b7a\"><td style=\"padding:4px 8px\">Member</td><td style=\"padding:4px 8px\">Open</td><td style=\"padding:4px 8px\">In progress</td><td style=\"padding:4px 8px\">Blocked</td></tr>${work}</table>` : ''}\n<p style=\"margin-top:20px;font-size:11px;color:#8a94a3\">Generated by the n8n Jira Sprint Health Monitor. Run ${esc(d.run_id)}. Overload threshold: ${config.overloadThreshold} open issues.</p>\n</div>`;\n\n  const line = (title, list, extra) => list.length\n    ? `\\n${title} (${list.length}):\\n` + list.slice(0, config.maxListItems).map((i) => `  - ${i.key} ${i.summary} [${i.assignee || 'Unassigned'}] ${extra(i)}`).join('\\n')\n    : '';\n  const text = `${d.sprint_name}: ${d.health} (${d.health_reasons.join('; ')})\nDate: ${d.run_date} (${config.timezone})\nCompletion: ${m.completionPct}% (${m.done}/${m.total}); sprint elapsed ${m.elapsedPct}%; ${deltaTxt}${pointsTxt ? '\\n' + pointsTxt : ''}\nHealth basis: ${basisTxt} (${m.progressBy}: ${m.progressPct}%)${boardsTxt ? '\\n' + boardsTxt : ''}\nTo Do ${m.todo} | In Progress ${m.inProgress} | Done ${m.done} | Blocked ${m.blocked}`\n    + line('Blocked', d.lists.blocked, (i) => i.blockedReason)\n    + line(`In Progress > ${config.staleInProgressDays} days`, d.lists.stale, (i) => `${i.inProgressDays}d`)\n    + line('Overdue', d.lists.overdue, (i) => `due ${i.due}`)\n    + line('Unassigned', d.lists.unassigned, (i) => i.status)\n    + (d.workload.length ? '\\n\\nWorkload: ' + d.workload.map((p) => `${p.name} ${p.open}${p.overloaded ? ' (overloaded)' : ''}`).join(', ') : '')\n    + '\\n';\n  return { subject, html, text };\n}\n\n// pages: [{ sprint: {id,name,boardId,startDate,endDate,goal}, issues: [...] }]\nfunction analyzeSprints({ pages, config, history, recipients, now, runId, dryRun, force }) {\n  const nowMs = now instanceof Date ? now.getTime() : Number(now);\n  const today = localDate(nowMs, config.timezone);\n  const bySprint = new Map();\n  for (const p of pages) {\n    if (!p || !p.sprint) continue;\n    const id = String(p.sprint.id);\n    if (!bySprint.has(id)) bySprint.set(id, { sprint: p.sprint, issues: [] });\n    bySprint.get(id).issues.push(...(p.issues || []));\n  }\n  const ctx = { config, nowMs, today, history: history || [], recipients: recipients || [], runId, dryRun: !!dryRun, force: !!force };\n  return [...bySprint.values()].map(({ sprint, issues }) => analyzeSprint(sprint, issues, ctx));\n}\n\nif (typeof module !== 'undefined' && module.exports) {\n  module.exports = { analyzeSprints, parseJiraDate, localDate, normalizeIssue, blockedReason, healthOf, progressOf, renderEmail };\n}\n\n\n// ---- n8n wiring\nconst cfg = $('Config').first().json;\nconst rows = (name) => $(name).all().map((i) => i.json).filter((r) => r && r.id != null);\nreturn analyzeSprints({\n  pages: $input.all().map((i) => i.json),\n  config: cfg,\n  history: rows('Get Recent History'),\n  recipients: rows('Get Recipients'),\n  now: new Date(cfg.nowIso),\n  runId: cfg.runId,\n  dryRun: cfg.dryRun,\n  force: cfg.force,\n}).map((json) => ({ json }));"
       }
     },
     {
-      "id": "n018-should-send-",
+      "id": "n020-should-send-",
       "name": "Should Send?",
       "type": "n8n-nodes-base.filter",
       "typeVersion": 2.2,
@@ -702,7 +639,7 @@
       }
     },
     {
-      "id": "n019-build-claim-rows",
+      "id": "n021-build-claim-rows",
       "name": "Build Claim Rows",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -715,7 +652,7 @@
       }
     },
     {
-      "id": "n020-claim-digest",
+      "id": "n022-claim-digest",
       "name": "Claim Digest",
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
@@ -741,7 +678,7 @@
       }
     },
     {
-      "id": "n021-read-back-claims",
+      "id": "n023-read-back-claims",
       "name": "Read Back Claims",
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
@@ -771,7 +708,7 @@
       }
     },
     {
-      "id": "n022-decide-claims",
+      "id": "n024-decide-claims",
       "name": "Decide Claims",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -780,11 +717,11 @@
         -240
       ],
       "parameters": {
-        "jsCode": "// Decide Claims: race-safe \"claim before send\" for the daily digest.\n//\n// n8n Data Tables cannot make user columns unique (only table/column names are), so \"check, then insert\" can race\n// when two executions overlap. Instead every execution INSERTS its own claim\n// row (status=pending, random claim_token), then READS BACK all rows for the\n// same digest_key. Row ids are assigned by the database in insert order, so\n// every execution sees the same ordering and agrees on one winner:\n//   * an already-'sent' row always wins (someone delivered today's digest)\n//   * otherwise the live 'pending' claim with the lowest id wins\n//   * pending claims older than staleClaimMinutes are treated as crashed runs\n//     and ignored, so a crash between claim and send can't block the digest forever\n// Losers mark their row 'lost' and send nothing.\n\nfunction decideClaims({ myClaims, rows, nowMs, staleClaimMinutes, force }) {\n  const staleMs = staleClaimMinutes * 60e3;\n  const byKey = new Map();\n  for (const r of rows) {\n    if (!r || r.digest_key == null || r.id == null) continue;\n    if (!byKey.has(r.digest_key)) byKey.set(r.digest_key, new Map());\n    byKey.get(r.digest_key).set(r.id, r); // de-duplicate by id\n  }\n  return myClaims.map((mine) => {\n    const all = [...((byKey.get(mine.digest_key) || new Map()).values())];\n    const others = all.filter((r) => r.id !== mine.id);\n    const sentElsewhere = others.find((r) => r.status === 'sent');\n    if (sentElsewhere && !force) {\n      return { id: mine.id, digest_key: mine.digest_key, claim_token: mine.claim_token, won: false, reason: `already sent by row ${sentElsewhere.id}` };\n    }\n    const live = all.filter((r) => r.status === 'pending'\n      && (r.id === mine.id || nowMs - Date.parse(r.claimed_at) < staleMs));\n    const winner = live.reduce((min, r) => (min == null || r.id < min.id ? r : min), null);\n    const won = !!winner && winner.id === mine.id;\n    return {\n      id: mine.id,\n      digest_key: mine.digest_key,\n      claim_token: mine.claim_token,\n      won,\n      reason: won ? 'lowest live claim' : `lost to row ${winner ? winner.id : '?'}`,\n    };\n  });\n}\n\nif (typeof module !== 'undefined' && module.exports) module.exports = { decideClaims };\n\n\n// ---- n8n wiring\nconst cfg = $('Config').first().json;\nreturn decideClaims({\n  myClaims: $('Claim Digest').all().map((i) => i.json),\n  rows: $input.all().map((i) => i.json),\n  nowMs: Date.now(),\n  staleClaimMinutes: cfg.staleClaimMinutes,\n  force: cfg.force,\n}).map((json) => ({ json }));"
+        "jsCode": "// Decide Claims: race-safe \"claim before send\" for the daily digest.\r\n//\r\n// n8n Data Tables cannot make user columns unique (only table/column names are), so \"check, then insert\" can race\r\n// when two executions overlap. Instead every execution INSERTS its own claim\r\n// row (status=pending, random claim_token), then READS BACK all rows for the\r\n// same digest_key. Row ids are assigned by the database in insert order, so\r\n// every execution sees the same ordering and agrees on one winner:\r\n//   * an already-'sent' row always wins (someone delivered today's digest)\r\n//   * otherwise the live 'pending' claim with the lowest id wins\r\n//   * pending claims older than staleClaimMinutes are treated as crashed runs\r\n//     and ignored, so a crash between claim and send can't block the digest forever\r\n// Losers mark their row 'lost' and send nothing.\r\n\r\nfunction decideClaims({ myClaims, rows, nowMs, staleClaimMinutes, force }) {\r\n  const staleMs = staleClaimMinutes * 60e3;\r\n  const byKey = new Map();\r\n  for (const r of rows) {\r\n    if (!r || r.digest_key == null || r.id == null) continue;\r\n    if (!byKey.has(r.digest_key)) byKey.set(r.digest_key, new Map());\r\n    byKey.get(r.digest_key).set(r.id, r); // de-duplicate by id\r\n  }\r\n  return myClaims.map((mine) => {\r\n    const all = [...((byKey.get(mine.digest_key) || new Map()).values())];\r\n    const others = all.filter((r) => r.id !== mine.id);\r\n    const sentElsewhere = others.find((r) => r.status === 'sent');\r\n    if (sentElsewhere && !force) {\r\n      return { id: mine.id, digest_key: mine.digest_key, claim_token: mine.claim_token, won: false, reason: `already sent by row ${sentElsewhere.id}` };\r\n    }\r\n    const live = all.filter((r) => r.status === 'pending'\r\n      && (r.id === mine.id || nowMs - Date.parse(r.claimed_at) < staleMs));\r\n    const winner = live.reduce((min, r) => (min == null || r.id < min.id ? r : min), null);\r\n    const won = !!winner && winner.id === mine.id;\r\n    return {\r\n      id: mine.id,\r\n      digest_key: mine.digest_key,\r\n      claim_token: mine.claim_token,\r\n      won,\r\n      reason: won ? 'lowest live claim' : `lost to row ${winner ? winner.id : '?'}`,\r\n    };\r\n  });\r\n}\r\n\r\nif (typeof module !== 'undefined' && module.exports) module.exports = { decideClaims };\r\n\n\n// ---- n8n wiring\nconst cfg = $('Config').first().json;\nreturn decideClaims({\n  myClaims: $('Claim Digest').all().map((i) => i.json),\n  rows: $input.all().map((i) => i.json),\n  nowMs: Date.now(),\n  staleClaimMinutes: cfg.staleClaimMinutes,\n  force: cfg.force,\n}).map((json) => ({ json }));"
       }
     },
     {
-      "id": "n023-won-claim-",
+      "id": "n025-won-claim-",
       "name": "Won Claim?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
@@ -818,7 +755,7 @@
       }
     },
     {
-      "id": "n024-prepare-email",
+      "id": "n026-prepare-email",
       "name": "Prepare Email",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -831,7 +768,7 @@
       }
     },
     {
-      "id": "n025-send-one-at-a-time",
+      "id": "n027-send-one-at-a-time",
       "name": "Send One At A Time",
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
@@ -845,7 +782,7 @@
       }
     },
     {
-      "id": "n026-send-digest-email",
+      "id": "n028-send-digest-email",
       "name": "Send Digest Email",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
@@ -876,7 +813,7 @@
       "onError": "continueRegularOutput"
     },
     {
-      "id": "n027-resolve-claims",
+      "id": "n029-resolve-claims",
       "name": "Resolve Claims",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -890,7 +827,7 @@
       }
     },
     {
-      "id": "n028-record-result",
+      "id": "n030-record-result",
       "name": "Record Result",
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
@@ -933,7 +870,7 @@
       "waitBetweenTries": 3000
     },
     {
-      "id": "n029-mark-lost",
+      "id": "n031-mark-lost",
       "name": "Mark Lost",
       "type": "n8n-nodes-base.dataTable",
       "typeVersion": 1.1,
@@ -972,7 +909,7 @@
       }
     },
     {
-      "id": "n030-run-summary",
+      "id": "n032-run-summary",
       "name": "Run Summary",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -981,7 +918,7 @@
         120
       ],
       "parameters": {
-        "jsCode": "// Runs after the send branch (lower on the canvas = later in v1 execution order).\nconst cfg = $('Config').first().json;\n// Resolve Claims runs once per loop iteration, so gather every run's output.\nconst got = (n, maxRuns = 1) => {\n  if (!$(n).isExecuted) return [];\n  const out = [];\n  for (let r = 0; r < maxRuns; r++) {\n    try { out.push(...$(n).all(0, r).map((i) => i.json)); } catch (e) { break; }\n  }\n  return out;\n};\nconst loops = $('Prepare Email').isExecuted ? $('Prepare Email').all().length : 0;\nconst results = new Map(got('Resolve Claims', loops).map((r) => [r.digest_key, r]));\nconst decisions = new Map(got('Decide Claims').map((r) => [r.digest_key, r]));\nconst sprints = $input.all().map(({ json: d }) => {\n  const r = results.get(d.digest_key);\n  const c = decisions.get(d.digest_key);\n  const outcome = r ? r.status : (c && !c.won ? 'lost_race' : d.action);\n  const out = { sprint: d.sprint_name, digest_key: d.digest_key, health: d.health, completionPct: d.metrics.completionPct,\n    blocked: d.metrics.blocked, stale: d.metrics.stale, overdue: d.metrics.overdue, unassigned: d.metrics.unassigned,\n    overloaded: d.workload.filter((w) => w.overloaded).map((w) => w.name), recipients: d.recipients.length, outcome };\n  if (r && r.error) out.error = r.error;\n  if (d.action === 'preview') out.preview = { subject: d.subject, to: d.recipients, text: d.text };\n  return out;\n});\nconst failed = sprints.filter((s) => s.outcome === 'failed');\nconst summary = { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, finishedAt: new Date().toISOString(),\n  sent: sprints.filter((s) => s.outcome === 'sent').length, failed: failed.length, sprints };\nif (failed.length) {\n  // Surface the failure: the run is marked as errored and the Error Workflow emails the admins.\n  throw new Error('Digest email failed for ' + failed.map((f) => f.digest_key).join(', ') + ': ' + failed[0].error);\n}\nreturn [{ json: summary }];"
+        "jsCode": "// Runs after the send branch (lower on the canvas = later in v1 execution order).\nconst cfg = $('Config').first().json;\n// Resolve Claims runs once per loop iteration, so gather every run's output.\nconst got = (n, maxRuns = 1) => {\n  if (!$(n).isExecuted) return [];\n  const out = [];\n  for (let r = 0; r < maxRuns; r++) {\n    try { out.push(...$(n).all(0, r).map((i) => i.json)); } catch (e) { break; }\n  }\n  return out;\n};\nconst loops = $('Prepare Email').isExecuted ? $('Prepare Email').all().length : 0;\nconst results = new Map(got('Resolve Claims', loops).map((r) => [r.digest_key, r]));\nconst decisions = new Map(got('Decide Claims').map((r) => [r.digest_key, r]));\nconst sprints = $input.all().map(({ json: d }) => {\n  const r = results.get(d.digest_key);\n  const c = decisions.get(d.digest_key);\n  const outcome = r ? r.status : (c && !c.won ? 'lost_race' : d.action);\n  const out = { sprint: d.sprint_name, digest_key: d.digest_key, health: d.health, completionPct: d.metrics.completionPct,\n    pointsPct: d.metrics.pointsPct, progressPct: d.metrics.progressPct, progressBy: d.metrics.progressBy, boards: d.board_ids,\n    blocked: d.metrics.blocked, stale: d.metrics.stale, overdue: d.metrics.overdue, unassigned: d.metrics.unassigned,\n    overloaded: d.workload.filter((w) => w.overloaded).map((w) => w.name), recipients: d.recipients.length, outcome };\n  if (d.action === 'send' || d.action === 'preview') out.to = d.recipients;\n  if (r && r.error) out.error = r.error;\n  if (d.action === 'preview') out.preview = { subject: d.subject, to: d.recipients, text: d.text };\n  return out;\n});\nconst failed = sprints.filter((s) => s.outcome === 'failed');\nconst summary = { runId: cfg.runId, trigger: cfg.trigger, dryRun: cfg.dryRun, finishedAt: new Date().toISOString(),\n  timezone: cfg.timezone, workflowTimezone: cfg.workflowTimezone, configWarnings: cfg.configWarnings || [],\n  sent: sprints.filter((s) => s.outcome === 'sent').length, failed: failed.length, sprints };\nif (failed.length) {\n  // Surface the failure: the run is marked as errored and the Error Workflow emails the admins.\n  throw new Error('Digest email failed for ' + failed.map((f) => f.digest_key).join(', ') + ': ' + failed[0].error);\n}\nreturn [{ json: summary }];"
       }
     }
   ],
@@ -1067,6 +1004,17 @@
       "main": [
         [
           {
+            "node": "Boards Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Boards Request": {
+      "main": [
+        [
+          {
             "node": "Get Scrum Boards",
             "type": "main",
             "index": 0
@@ -1122,7 +1070,7 @@
       "main": [
         [
           {
-            "node": "Get Sprint Issues",
+            "node": "Issues Request",
             "type": "main",
             "index": 0
           }
@@ -1130,6 +1078,17 @@
         [
           {
             "node": "No Active Sprint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Issues Request": {
+      "main": [
+        [
+          {
+            "node": "Get Sprint Issues",
             "type": "main",
             "index": 0
           }

@@ -2,6 +2,7 @@
 // rest of the workflow has no hard-coded values. Secrets do NOT belong here:
 // the Jira token and SMTP password live in n8n credentials, and recipient email
 // addresses live in the sprint_digest_recipients Data Table.
+// Every key is checked by src/validate.js when the workflow starts.
 
 const DEFAULT_CONFIG = {
   // Jira site root, e.g. https://your-team.atlassian.net (must match the credential's domain)
@@ -22,9 +23,20 @@ const DEFAULT_CONFIG = {
   criticalBlockedCount: 3,         // >= this many blocked -> Critical
   criticalBehindPct: 30,           // completion behind elapsed time by >= this -> Critical
   atRiskBehindPct: 15,             // ... by >= this -> At Risk
-  // API paging
-  pageSize: 100,
-  maxPages: 50,
+  // Progress used for "behind schedule": 'issues' (Done / total issues), 'points'
+  // (done story points / total), or 'both' = whichever is lower (the safer view).
+  progressBasis: 'both',
+  minPointsCoveragePct: 50,        // story points count only if >= this % of issues are estimated
+  // Recipient routing when a sprint shows on several boards:
+  // 'all' = recipients of any board that shows the sprint; 'origin' = the sprint's own board only
+  sprintBoardRouting: 'all',
+  // Jira API: paging and rate limits
+  pageSize: 100,                   // maxResults per request (Jira caps it at 100)
+  maxPages: 50,                    // safety cap per call
+  jiraMaxRetries: 4,               // retries per request on 429 / 5xx / network errors (0 = no retry)
+  jiraRetryBaseDelayMs: 1000,      // exponential backoff: base * 2^attempt (+ jitter), when Jira sends no Retry-After
+  jiraRetryMaxDelayMs: 30000,      // longest single wait; a longer Retry-After fails the run instead of stalling it
+  jiraPageIntervalMs: 200,         // pause between pages
   // Delivery
   fromEmail: 'n8n Sprint Digest <sprint-digest@your-domain.com>',
   staleClaimMinutes: 30,           // a 'pending' claim older than this is treated as a crashed run

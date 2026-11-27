@@ -59,17 +59,21 @@ function normalizeIssue(raw, ctx) {
   const due = f.duedate || null; // date-only "YYYY-MM-DD"
   const overdueDays = due && !isDone && due < today ? daysBetweenDates(due, today) : 0;
   const rawPoints = config.storyPointsField ? f[config.storyPointsField] : null;
-  const points = typeof rawPoints === 'number' ? rawPoints : 0;
+  const estimated = typeof rawPoints === 'number' && Number.isFinite(rawPoints);
+  const points = estimated ? rawPoints : 0;
   return {
     key: raw.key,
     summary: f.summary || '',
     status: (f.status && f.status.name) || 'Unknown',
     category,
     bucket: blocked ? 'Blocked' : ({ todo: 'To Do', inprogress: 'In Progress', done: 'Done' })[category],
+    // accountId is the stable identity; display names are not unique (two "Rahul"s)
+    assigneeId: f.assignee ? (f.assignee.accountId || f.assignee.displayName || null) : null,
     assignee: f.assignee ? (f.assignee.displayName || f.assignee.accountId) : null,
     priority: (f.priority && f.priority.name) || '',
     due,
     points,
+    estimated,
     inProgressDays: inProgressDays == null ? null : Math.round(inProgressDays * 10) / 10,
     flags: {
       stale: inProgressDays != null && inProgressDays > config.staleInProgressDays && !blocked,
@@ -82,16 +86,51 @@ function normalizeIssue(raw, ctx) {
   };
 }
 
+// Two different people can share a display name. Group by accountId everywhere and,
+// only when a name is ambiguous within the sprint, show "Name (…1a2b)" so the
+// digest tells them apart.
+function labelAssignees(issues) {
+  const idsByName = new Map();
+  for (const i of issues) {
+    if (!i.assigneeId) continue;
+    if (!idsByName.has(i.assignee)) idsByName.set(i.assignee, new Set());
+    idsByName.get(i.assignee).add(i.assigneeId);
+  }
+  for (const i of issues) {
+    if (i.assigneeId && idsByName.get(i.assignee).size > 1) {
+      i.assignee = `${i.assignee} (…${String(i.assigneeId).slice(-4)})`;
+    }
+  }
+}
+
+// Progress used for health: issue count, story points, or the lower of the two.
+// Story points only count when enough of the sprint is estimated; otherwise a
+// sprint with one 13-point story done would look 90% complete.
+function progressOf(m, config) {
+  const basis = config.progressBasis || 'both';
+  const minCoverage = config.minPointsCoveragePct == null ? 50 : config.minPointsCoveragePct;
+  const pointsUsable = m.pointsTotal > 0 && m.pointsCoveragePct >= minCoverage;
+  if (basis === 'issues' || !pointsUsable) {
+    return { progressPct: m.completionPct, progressBy: 'issues', pointsUsable };
+  }
+  if (basis === 'points' || m.pointsPct < m.completionPct) {
+    return { progressPct: m.pointsPct, progressBy: 'story points', pointsUsable };
+  }
+  return { progressPct: m.completionPct, progressBy: 'issues', pointsUsable };
+}
+
 function healthOf(m, config) {
   const reasons = [];
   if (m.total === 0) return { health: 'Empty', reasons: ['Sprint has no issues'] };
-  const behind = m.elapsedPct - m.completionPct;
+  const progress = m.progressPct == null ? m.completionPct : m.progressPct;
+  const behind = m.elapsedPct - progress;
+  const behindTxt = `${behind}% behind schedule (by ${m.progressBy || 'issues'})`;
   if (m.blocked >= config.criticalBlockedCount) reasons.push(`${m.blocked} issues blocked`);
-  if (behind >= config.criticalBehindPct) reasons.push(`${behind} pts behind schedule`);
+  if (behind >= config.criticalBehindPct) reasons.push(behindTxt);
   if (reasons.length) return { health: 'Critical', reasons };
   if (m.blocked > 0) reasons.push(`${m.blocked} blocked`);
   if (m.overdue > 0) reasons.push(`${m.overdue} overdue`);
-  if (behind >= config.atRiskBehindPct) reasons.push(`${behind} pts behind schedule`);
+  if (behind >= config.atRiskBehindPct) reasons.push(behindTxt);
   if (m.overloaded > 0) reasons.push(`${m.overloaded} overloaded member(s)`);
   if (reasons.length) return { health: 'At Risk', reasons };
   return { health: 'Healthy', reasons: ['On track'] };
@@ -109,6 +148,7 @@ function analyzeSprint(sprint, rawIssues, ctx) {
     seen.add(r.key);
     issues.push(normalizeIssue(r, ctx));
   }
+  labelAssignees(issues);
   const count = (fn) => issues.filter(fn).length;
   const startMs = parseJiraDate(sprint.startDate);
   const endMs = parseJiraDate(sprint.endDate);
@@ -116,11 +156,12 @@ function analyzeSprint(sprint, rawIssues, ctx) {
     ? Math.max(0, Math.min(100, Math.round(((nowMs - startMs) / (endMs - startMs)) * 100))) : 0;
   const daysLeft = endMs ? Math.max(0, Math.ceil((endMs - nowMs) / DAY_MS)) : null;
 
-  // workload per assignee (unresolved only)
+  // workload per assignee (unresolved only), keyed by accountId, not display name
   const byPerson = {};
   for (const i of issues) {
-    if (i.category === 'done' || !i.assignee) continue;
-    const p = byPerson[i.assignee] || (byPerson[i.assignee] = { name: i.assignee, open: 0, inProgress: 0, blocked: 0, points: 0 });
+    if (i.category === 'done' || !i.assigneeId) continue;
+    const p = byPerson[i.assigneeId]
+      || (byPerson[i.assigneeId] = { accountId: i.assigneeId, name: i.assignee, open: 0, inProgress: 0, blocked: 0, points: 0 });
     p.open += 1;
     if (i.bucket === 'In Progress') p.inProgress += 1;
     if (i.bucket === 'Blocked') p.blocked += 1;
@@ -128,7 +169,7 @@ function analyzeSprint(sprint, rawIssues, ctx) {
   }
   const workload = Object.values(byPerson)
     .map((p) => ({ ...p, overloaded: p.open >= config.overloadThreshold }))
-    .sort((a, b) => b.open - a.open || a.name.localeCompare(b.name));
+    .sort((a, b) => b.open - a.open || a.name.localeCompare(b.name) || a.accountId.localeCompare(b.accountId));
 
   const m = {
     total: issues.length,
@@ -142,11 +183,14 @@ function analyzeSprint(sprint, rawIssues, ctx) {
     overloaded: workload.filter((p) => p.overloaded).length,
     pointsTotal: issues.reduce((s, i) => s + i.points, 0),
     pointsDone: issues.filter((i) => i.category === 'done').reduce((s, i) => s + i.points, 0),
+    estimated: count((i) => i.estimated),
     elapsedPct,
     daysLeft,
   };
   m.completionPct = pct(m.done, m.total);
   m.pointsPct = pct(m.pointsDone, m.pointsTotal);
+  m.pointsCoveragePct = pct(m.estimated, m.total);
+  Object.assign(m, progressOf(m, config));
   const { health, reasons } = healthOf(m, config);
 
   // previous sent snapshot for this sprint (strictly before today) -> day-over-day delta
@@ -159,14 +203,23 @@ function analyzeSprint(sprint, rawIssues, ctx) {
     completionPct: m.completionPct - Number(prev.completion_pct || 0),
     done: m.done - Number(prev.done || 0),
     blocked: m.blocked - Number(prev.blocked || 0),
+    pointsPct: Number(prev.points_total) > 0 && m.pointsTotal > 0
+      ? m.pointsPct - pct(Number(prev.points_done || 0), Number(prev.points_total)) : null,
   } : null;
 
   // dedupe decision against today's rows (the claim step re-checks under race)
   const todays = history.filter((r) => r.digest_key === digestKey);
   const staleClaimMs = config.staleClaimMinutes * 60e3;
+  // A sprint can show on several boards (its origin board plus any board whose
+  // filter includes its issues). Route to recipients of ANY of those boards, or
+  // only the origin board when Config.sprintBoardRouting = 'origin'.
+  const boards = (Array.isArray(sprint.boards) && sprint.boards.length)
+    ? sprint.boards : (sprint.boardId ? [{ id: sprint.boardId, name: '' }] : []);
+  const routeBoards = (config.sprintBoardRouting === 'origin' && sprint.boardId ? [sprint.boardId] : boards.map((b) => b.id))
+    .map((id) => String(Number(id)));
   const to = recipients
     .filter((r) => r.active !== false && (r.role || 'digest') === 'digest')
-    .filter((r) => !Number(r.board_id) || String(r.board_id) === String(sprint.boardId))
+    .filter((r) => !Number(r.board_id) || routeBoards.includes(String(Number(r.board_id))))
     .map((r) => String(r.email).trim()).filter(Boolean);
   const uniqueTo = [...new Set(to)];
   let action = 'send';
@@ -190,6 +243,8 @@ function analyzeSprint(sprint, rawIssues, ctx) {
     sprint_id: Number(sprint.id),
     sprint_name: sprint.name || `Sprint ${sprint.id}`,
     board_id: Number(sprint.boardId) || 0,
+    board_ids: boards.map((b) => Number(b.id)),
+    boards,
     sprint_goal: sprint.goal || '',
     sprint_start: sprint.startDate || '',
     sprint_end: sprint.endDate || '',
@@ -218,9 +273,17 @@ const HEALTH_COLOR = { Healthy: '#1a7f5a', 'At Risk': '#c26a00', Critical: '#c62
 function renderEmail(d, config) {
   const m = d.metrics;
   const browse = (k) => `${String(config.jiraBaseUrl || '').replace(/\/+$/, '')}/browse/${k}`;
+  const sign = (n) => `${n >= 0 ? '+' : ''}${n}`;
   const deltaTxt = d.delta
-    ? `${d.delta.completionPct >= 0 ? '+' : ''}${d.delta.completionPct} pts vs ${d.delta.since}`
+    ? `${sign(d.delta.completionPct)} pts vs ${d.delta.since}`
+      + (d.delta.pointsPct != null && m.pointsUsable ? ` (story points ${sign(d.delta.pointsPct)} pts)` : '')
     : 'first digest for this sprint';
+  const pointsTxt = m.pointsTotal
+    ? `Story points: ${m.pointsDone}/${m.pointsTotal} done (${m.pointsPct}%), ${m.estimated} of ${m.total} issues estimated.`
+      + (m.pointsUsable ? '' : ` Not used for health: under ${config.minPointsCoveragePct == null ? 50 : config.minPointsCoveragePct}% of issues are estimated.`)
+    : '';
+  const basisTxt = ({ issues: 'issue count', points: 'story points', both: 'the lower of issue-count and story-point progress' })[config.progressBasis || 'both'];
+  const boardsTxt = d.boards.length > 1 ? `Boards: ${d.boards.map((b) => b.name || `#${b.id}`).join(', ')}` : '';
   const subject = `[Sprint Health] ${d.sprint_name} | ${d.health} | ${m.completionPct}% done | ${d.run_date}`;
 
   const issueRows = (list, extra) => list.slice(0, config.maxListItems).map((i) =>
@@ -243,13 +306,14 @@ function renderEmail(d, config) {
 <p style="margin:0 0 12px;color:#5f6b7a">Daily sprint health digest for ${esc(d.run_date)} (${esc(config.timezone)}). ${esc(d.health_reasons.join('; '))}.</p>
 ${d.sprint_goal ? `<p style="margin:0 0 12px"><b>Goal:</b> ${esc(d.sprint_goal)}</p>` : ''}
 <table style="border-collapse:collapse;font-size:14px;margin-bottom:8px"><tr>
-<td style="padding:6px 12px;background:#eef2f7"><b>${m.completionPct}%</b> done (${m.done}/${m.total})</td>
+<td style="padding:6px 12px;background:#eef2f7"><b>${m.completionPct}%</b> of issues done (${m.done}/${m.total})</td>
+${m.pointsTotal ? `<td style="padding:6px 12px;background:#eef2f7"><b>${m.pointsPct}%</b> of story points (${m.pointsDone}/${m.pointsTotal})</td>` : ''}
 <td style="padding:6px 12px;background:#eef2f7"><b>${m.elapsedPct}%</b> of sprint elapsed${m.daysLeft != null ? `, ${m.daysLeft} day(s) left` : ''}</td>
 <td style="padding:6px 12px;background:#eef2f7">${esc(deltaTxt)}</td></tr></table>
 <table style="border-collapse:collapse;font-size:14px"><tr>
 <td style="padding:6px 12px">To Do: <b>${m.todo}</b></td><td style="padding:6px 12px">In Progress: <b>${m.inProgress}</b></td>
 <td style="padding:6px 12px">Done: <b>${m.done}</b></td><td style="padding:6px 12px">Blocked: <b>${m.blocked}</b></td></tr></table>
-${m.pointsTotal ? `<p style="font-size:13px;color:#5f6b7a">Story points: ${m.pointsDone}/${m.pointsTotal} (${m.pointsPct}%)</p>` : ''}
+<p style="font-size:13px;color:#5f6b7a">Health compares sprint time elapsed with ${esc(basisTxt)} (${esc(m.progressBy)}: ${m.progressPct}%). ${esc(pointsTxt)}${boardsTxt ? ' ' + esc(boardsTxt) + '.' : ''}</p>
 ${section('Blocked', d.lists.blocked, (i) => i.blockedReason)}
 ${section(`In Progress for more than ${config.staleInProgressDays} days`, d.lists.stale, (i) => `${i.inProgressDays} days`)}
 ${section('Overdue', d.lists.overdue, (i) => `due ${i.due} (${i.overdueDays}d late)`)}
@@ -264,7 +328,8 @@ ${d.workload.length ? `<h3 style="margin:18px 0 6px;font-size:15px">Workload (un
     : '';
   const text = `${d.sprint_name}: ${d.health} (${d.health_reasons.join('; ')})
 Date: ${d.run_date} (${config.timezone})
-Completion: ${m.completionPct}% (${m.done}/${m.total}); sprint elapsed ${m.elapsedPct}%; ${deltaTxt}
+Completion: ${m.completionPct}% (${m.done}/${m.total}); sprint elapsed ${m.elapsedPct}%; ${deltaTxt}${pointsTxt ? '\n' + pointsTxt : ''}
+Health basis: ${basisTxt} (${m.progressBy}: ${m.progressPct}%)${boardsTxt ? '\n' + boardsTxt : ''}
 To Do ${m.todo} | In Progress ${m.inProgress} | Done ${m.done} | Blocked ${m.blocked}`
     + line('Blocked', d.lists.blocked, (i) => i.blockedReason)
     + line(`In Progress > ${config.staleInProgressDays} days`, d.lists.stale, (i) => `${i.inProgressDays}d`)
@@ -291,5 +356,5 @@ function analyzeSprints({ pages, config, history, recipients, now, runId, dryRun
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { analyzeSprints, parseJiraDate, localDate, normalizeIssue, blockedReason, healthOf, renderEmail };
+  module.exports = { analyzeSprints, parseJiraDate, localDate, normalizeIssue, blockedReason, healthOf, progressOf, renderEmail };
 }
